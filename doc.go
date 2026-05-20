@@ -15,16 +15,12 @@
 //		return err
 //	}
 //
-//	if err := putTo(ctx, manager, "s3", "reports/a.txt", []byte("hello")); err != nil {
+//	s3Disk, err := manager.Disk("s3")
+//	if err != nil {
 //		return err
 //	}
-//
-//	func putTo(ctx context.Context, manager *filesystem.Manager, diskName string, path string, data []byte) error {
-//		disk, err := manager.Disk(diskName)
-//		if err != nil {
-//			return err
-//		}
-//		return disk.Put(ctx, path, data)
+//	if err := s3Disk.Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
+//		return err
 //	}
 //
 // 路径请使用类似 "avatars/me.png" 的相对路径，不要传操作系统绝对路径。

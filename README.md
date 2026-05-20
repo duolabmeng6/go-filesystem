@@ -9,9 +9,23 @@ Go 文档地址：<https://pkg.go.dev/github.com/duolabmeng6/go-filesystem>
 `go-filesystem` 最方便的地方是：你可以同时配置本地目录、S3/R2/B2/MinIO、阿里云 OSS，然后明确指定这次文件要写到哪个 disk。
 
 ```go
-err := putTo(ctx, manager, "local", "reports/a.txt", data) // 写入本地目录
-err := putTo(ctx, manager, "s3", "reports/a.txt", data)    // 写入 S3/R2/B2/MinIO
-err := putTo(ctx, manager, "oss", "reports/a.txt", data)   // 写入阿里云 OSS
+localDisk, err := manager.Disk("local")
+if err != nil {
+	return err
+}
+err = localDisk.Put(ctx, "reports/a.txt", data)
+
+s3Disk, err := manager.Disk("s3")
+if err != nil {
+	return err
+}
+err = s3Disk.Put(ctx, "reports/a.txt", data)
+
+ossDisk, err := manager.Disk("oss")
+if err != nil {
+	return err
+}
+err = ossDisk.Put(ctx, "reports/a.txt", data)
 ```
 
 ## 安装
@@ -69,30 +83,23 @@ manager, err := filesystem.NewFromConfig(
 再指定写到哪里：
 
 ```go
-err := putTo(ctx, manager, "local", "reports/a.txt", data)
-err := putTo(ctx, manager, "s3", "reports/a.txt", data)
-err := putTo(ctx, manager, "oss", "reports/a.txt", data)
-```
+localDisk, err := manager.Disk("local")
+if err != nil {
+	return err
+}
 
-`putTo` 就是按名称取 disk 再写入：
+s3Disk, err := manager.Disk("s3")
+if err != nil {
+	return err
+}
 
-```go
-func putTo(ctx context.Context, manager *filesystem.Manager, diskName string, path string, data []byte) error {
-	disk, err := manager.Disk(diskName)
-	if err != nil {
-		return err
-	}
-	return disk.Put(ctx, path, data)
+ossDisk, err := manager.Disk("oss")
+if err != nil {
+	return err
 }
 ```
 
 如果你想通过命令切换，也只是把 disk 名称换成参数：
-
-```sh
-FILESYSTEM_DISK=local go run .
-FILESYSTEM_DISK=s3 go run .
-FILESYSTEM_DISK=oss go run .
-```
 
 ```go
 diskName := os.Getenv("FILESYSTEM_DISK")
@@ -100,7 +107,12 @@ if diskName == "" {
 	diskName = "local"
 }
 
-err := putTo(ctx, manager, diskName, "reports/a.txt", data)
+disk, err := manager.Disk(diskName)
+if err != nil {
+	return err
+}
+
+err = disk.Put(ctx, "reports/a.txt", data)
 ```
 
 ## 完整示例
@@ -165,23 +177,29 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := putTo(ctx, manager, "local", "reports/local.txt", []byte("local")); err != nil {
-		log.Fatal(err)
-	}
-	if err := putTo(ctx, manager, "s3", "reports/s3.txt", []byte("s3")); err != nil {
-		log.Fatal(err)
-	}
-	if err := putTo(ctx, manager, "oss", "reports/oss.txt", []byte("oss")); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func putTo(ctx context.Context, manager *filesystem.Manager, diskName string, path string, data []byte) error {
-	disk, err := manager.Disk(diskName)
+	localDisk, err := manager.Disk("local")
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
-	return disk.Put(ctx, path, data)
+	if err := localDisk.Put(ctx, "reports/local.txt", []byte("local")); err != nil {
+		log.Fatal(err)
+	}
+
+	s3Disk, err := manager.Disk("s3")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := s3Disk.Put(ctx, "reports/s3.txt", []byte("s3")); err != nil {
+		log.Fatal(err)
+	}
+
+	ossDisk, err := manager.Disk("oss")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := ossDisk.Put(ctx, "reports/oss.txt", []byte("oss")); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
