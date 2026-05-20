@@ -20,9 +20,10 @@ func ExampleManager() {
 	defer os.RemoveAll(root)
 
 	manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
-		Default: "local",
+		Default: "storage",
 		Disks: map[string]filesystem.DiskConfig{
-			"local": {
+			// 业务代码只使用 storage 这个别名。实际项目里可以把它换成 s3 或 oss 配置。
+			"storage": {
 				Driver: "local",
 				Root:   filepath.Join(root, "private"),
 			},
@@ -38,6 +39,7 @@ func ExampleManager() {
 		log.Fatal(err)
 	}
 
+	// 从这里开始就是稳定的业务代码：不关心 storage 指向本地目录、S3 还是 OSS。
 	if err := manager.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
 		log.Fatal(err)
 	}

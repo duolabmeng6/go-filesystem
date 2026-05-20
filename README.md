@@ -6,13 +6,23 @@ Go 文档地址：<https://pkg.go.dev/github.com/duolabmeng6/go-filesystem>
 
 许可证：MIT
 
+`go-filesystem` 最方便的地方是：业务代码只认一个 disk 别名，例如 `storage`；部署时通过配置把这个别名指向本地目录、S3/R2/B2/MinIO，或者阿里云 OSS。上传、下载、生成链接的业务代码不用跟着存储方式变化。
+
 ## 安装
 
 ```sh
 go get github.com/duolabmeng6/go-filesystem
 ```
 
-## 30 秒写入一个文件
+## 一个别名切换本地、S3、OSS
+
+下面这个例子里，业务代码始终使用 `storage` 这个别名。你只需要改启动命令里的 `FILESYSTEM_DRIVER=local|s3|oss`，就能切换实际存储位置。
+
+```sh
+FILESYSTEM_DRIVER=local go run .
+FILESYSTEM_DRIVER=s3 go run .
+FILESYSTEM_DRIVER=oss go run .
+```
 
 ```go
 package main
@@ -20,27 +30,70 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 
 	"github.com/duolabmeng6/go-filesystem"
+	ossdriver "github.com/duolabmeng6/go-filesystem/drivers/oss"
+	s3driver "github.com/duolabmeng6/go-filesystem/drivers/s3"
 	"github.com/duolabmeng6/go-filesystem/local"
 )
 
 func main() {
 	ctx := context.Background()
 
-	manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
-		Default: "local",
-		Disks: map[string]filesystem.DiskConfig{
-			"local": {
-				Driver: "local",
-				Root:   "storage/app",
+	// storage 是业务别名；driver 决定 storage 最终指向本地、S3 还是 OSS。
+	driver := os.Getenv("FILESYSTEM_DRIVER")
+	if driver == "" {
+		driver = "local"
+	}
+
+	storageConfig := filesystem.DiskConfig{Driver: "local", Root: "storage/app"}
+	switch driver {
+	case "s3":
+		storageConfig = filesystem.DiskConfig{
+			Driver:  "s3",
+			BaseURL: os.Getenv("S3_BASE_URL"),
+			Options: map[string]any{
+				"bucket":            os.Getenv("S3_BUCKET"),
+				"region":            os.Getenv("S3_REGION"),
+				"endpoint":          os.Getenv("S3_ENDPOINT"),
+				"access_key_id":     os.Getenv("S3_ACCESS_KEY_ID"),
+				"access_key_secret": os.Getenv("S3_ACCESS_KEY_SECRET"),
+				"use_path_style":    true,
+				"disable_acl":       true,
+			},
+		}
+	case "oss":
+		storageConfig = filesystem.DiskConfig{
+			Driver:  "oss",
+			BaseURL: os.Getenv("OSS_BASE_URL"),
+			Options: map[string]any{
+				"bucket":            os.Getenv("OSS_BUCKET"),
+				"region":            os.Getenv("OSS_REGION"),
+				"endpoint":          os.Getenv("OSS_ENDPOINT"),
+				"access_key_id":     os.Getenv("OSS_ACCESS_KEY_ID"),
+				"access_key_secret": os.Getenv("OSS_ACCESS_KEY_SECRET"),
+			},
+		}
+	}
+
+	manager, err := filesystem.NewFromConfig(
+		ctx,
+		filesystem.Config{
+			Default: "storage",
+			Disks: map[string]filesystem.DiskConfig{
+				"storage": storageConfig,
 			},
 		},
-	}, filesystem.WithDriver("local", local.NewFactory()))
+		filesystem.WithDriver("local", local.NewFactory()),
+		filesystem.WithDriver("s3", s3driver.NewFactory()),
+		filesystem.WithDriver("oss", ossdriver.NewFactory()),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// 从这里开始就是稳定的业务代码：不关心文件最终写到本地、S3 还是 OSS。
 	if err := manager.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
 		log.Fatal(err)
 	}
@@ -53,15 +106,29 @@ func main() {
 }
 ```
 
-## 常见用法
+## 常见配置
 
-### 使用公开文件目录
+### 只用本地目录
 
 ```go
 manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
-	Default: "private",
+	Default: "storage",
 	Disks: map[string]filesystem.DiskConfig{
-		"private": {
+		"storage": {
+			Driver: "local",
+			Root:   "storage/app",
+		},
+	},
+}, filesystem.WithDriver("local", local.NewFactory()))
+```
+
+### 公开文件目录
+
+```go
+manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
+	Default: "storage",
+	Disks: map[string]filesystem.DiskConfig{
+		"storage": {
 			Driver: "local",
 			Root:   "storage/app/private",
 		},
@@ -89,48 +156,58 @@ if err := publicDisk.Put(ctx, "avatars/me.png", data, filesystem.WithVisibility(
 url, err := publicDisk.URL(ctx, "avatars/me.png")
 ```
 
-### 使用 S3 兼容存储
+### 把 `storage` 别名切到 S3 兼容存储
 
 ```go
-import s3driver "github.com/duolabmeng6/go-filesystem/drivers/s3"
-
-disk, err := s3driver.NewDisk(context.Background(), s3driver.Config{
-	Bucket:          os.Getenv("S3_BUCKET"),
-	Region:          os.Getenv("S3_REGION"),
-	Endpoint:        os.Getenv("S3_ENDPOINT"),
-	AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
-	AccessKeySecret: os.Getenv("S3_ACCESS_KEY_SECRET"),
-	BaseURL:         os.Getenv("S3_BASE_URL"),
-	UsePathStyle:    true,
-	DisableACL:      true,
-})
+manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
+	Default: "storage",
+	Disks: map[string]filesystem.DiskConfig{
+		"storage": {
+			Driver:  "s3",
+			BaseURL: os.Getenv("S3_BASE_URL"),
+			Options: map[string]any{
+				"bucket":            os.Getenv("S3_BUCKET"),
+				"region":            os.Getenv("S3_REGION"),
+				"endpoint":          os.Getenv("S3_ENDPOINT"),
+				"access_key_id":     os.Getenv("S3_ACCESS_KEY_ID"),
+				"access_key_secret": os.Getenv("S3_ACCESS_KEY_SECRET"),
+				"use_path_style":    true,
+				"disable_acl":       true,
+			},
+		},
+	},
+}, filesystem.WithDriver("s3", s3driver.NewFactory()))
 if err != nil {
 	return err
 }
 
-if err := disk.Put(ctx, "uploads/a.txt", []byte("hello")); err != nil {
-	return err
-}
+err = manager.Put(ctx, "uploads/a.txt", []byte("hello"))
 ```
 
-### 使用阿里云 OSS
+### 把 `storage` 别名切到阿里云 OSS
 
 ```go
-import ossdriver "github.com/duolabmeng6/go-filesystem/drivers/oss"
-
-disk, err := ossdriver.NewDisk(ossdriver.Config{
-	Bucket:          os.Getenv("OSS_BUCKET"),
-	Region:          os.Getenv("OSS_REGION"),
-	Endpoint:        os.Getenv("OSS_ENDPOINT"),
-	AccessKeyID:     os.Getenv("OSS_ACCESS_KEY_ID"),
-	AccessKeySecret: os.Getenv("OSS_ACCESS_KEY_SECRET"),
-	BaseURL:         os.Getenv("OSS_BASE_URL"),
-})
+manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
+	Default: "storage",
+	Disks: map[string]filesystem.DiskConfig{
+		"storage": {
+			Driver:  "oss",
+			BaseURL: os.Getenv("OSS_BASE_URL"),
+			Options: map[string]any{
+				"bucket":            os.Getenv("OSS_BUCKET"),
+				"region":            os.Getenv("OSS_REGION"),
+				"endpoint":          os.Getenv("OSS_ENDPOINT"),
+				"access_key_id":     os.Getenv("OSS_ACCESS_KEY_ID"),
+				"access_key_secret": os.Getenv("OSS_ACCESS_KEY_SECRET"),
+			},
+		},
+	},
+}, filesystem.WithDriver("oss", ossdriver.NewFactory()))
 if err != nil {
 	return err
 }
 
-url, err := disk.TemporaryURL(ctx, "private/invoice.pdf", time.Now().Add(15*time.Minute))
+err = manager.Put(ctx, "uploads/a.txt", []byte("hello"))
 ```
 
 ## 中文教程
