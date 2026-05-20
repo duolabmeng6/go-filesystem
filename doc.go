@@ -1,21 +1,35 @@
 // Package filesystem 用统一写法操作本地目录、S3 兼容存储和阿里云 OSS。
 //
-// 推荐一次性配置多个 disk，例如 "local"、"s3"、"oss"。写文件时可以直接指定
-// disk 名称：manager.MustDisk("local") 写本地，manager.MustDisk("s3") 写 S3，
-// manager.MustDisk("oss") 写阿里云 OSS。
+// 最小用法：注册 local 驱动，配置一个本地目录，然后直接写入和读取默认 disk。
 //
 //	manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
 //		Default: "local",
 //		Disks: map[string]filesystem.DiskConfig{
 //			"local": {Driver: "local", Root: "storage/app"},
-//			"s3":    {Driver: "s3", Options: map[string]any{"bucket": "my-bucket"}},
 //		},
-//	}, filesystem.WithDriver("local", local.NewFactory()), filesystem.WithDriver("s3", s3driver.NewFactory()))
+//	}, filesystem.WithDriver("local", local.NewFactory()))
 //	if err != nil {
 //		return err
 //	}
 //
+//	if err := manager.Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
+//		return err
+//	}
+//	data, err := manager.Get(ctx, "reports/a.txt")
+//	if err != nil {
+//		return err
+//	}
+//
+// 也可以一次性配置多个 disk，例如 "local"、"s3"、"oss"。写文件时直接指定
+// disk 名称即可切换存储：
+//
+//	if err := manager.MustDisk("local").Put(ctx, "reports/a.txt", data); err != nil {
+//		return err
+//	}
 //	if err := manager.MustDisk("s3").Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
+//		return err
+//	}
+//	if err := manager.MustDisk("oss").Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
 //		return err
 //	}
 //
