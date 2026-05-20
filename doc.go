@@ -1,14 +1,23 @@
-// Package filesystem 提供一个小而稳定的 Go-first 文件与对象存储抽象。
+// Package filesystem 用统一写法操作本地文件、S3 兼容存储和阿里云 OSS。
 //
-// Manager 管理命名 disk 和默认 disk。Disk 提供业务代码使用的读写、列表、
-// 复制、移动、元数据、visibility、URL 和临时 URL API。驱动实现 Adapter，
-// 并可以按需实现原生 copy、公开 URL、临时 URL、目录操作和 visibility 控制等
-// 可选能力。
+// 最常见的用法是先创建一个 manager，然后通过默认 disk 或命名 disk 写入、
+// 读取、删除文件：
 //
-// 路径是 slash 分隔的存储路径，不是操作系统路径。库会拒绝绝对路径、dot
-// segment、重复斜杠、反斜杠、控制字符、Windows drive 路径、冒号 segment
-// 和 Windows 保留名。列表操作可以使用空 prefix 表示根目录。
+//	manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
+//		Default: "local",
+//		Disks: map[string]filesystem.DiskConfig{
+//			"local": {Driver: "local", Root: "storage/app"},
+//		},
+//	}, filesystem.WithDriver("local", local.NewFactory()))
+//	if err != nil {
+//		return err
+//	}
+//	if err := manager.Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
+//		return err
+//	}
 //
-// 本地驱动位于 local 包。云存储驱动位于核心包之外，目前包括 drivers/s3 和
-// drivers/oss。
+// 路径请使用类似 "avatars/me.png" 的相对路径，不要传操作系统绝对路径。
+//
+// 本地磁盘使用 local 包；S3 兼容存储使用 drivers/s3；阿里云 OSS 使用
+// drivers/oss。完整教程见仓库 docs 目录。
 package filesystem
