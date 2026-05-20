@@ -39,24 +39,16 @@ func ExampleManager() {
 	}
 
 	// 直接指定 disk 名称即可操作对应驱动。
-	// 配置了 s3 或 oss 后，同样可以写 manager.Disk("s3") 或 manager.Disk("oss")。
-	localDisk, err := manager.Disk("local")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := localDisk.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
+	// 配置了 s3 或 oss 后，同样可以写 manager.MustDisk("s3") 或 manager.MustDisk("oss")。
+	if err := manager.MustDisk("local").Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
 		log.Fatal(err)
 	}
 
-	publicDisk, err := manager.Disk("public")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := publicDisk.Put(ctx, "avatars/me.png", []byte("png")); err != nil {
+	if err := manager.MustDisk("public").Put(ctx, "avatars/me.png", []byte("png")); err != nil {
 		log.Fatal(err)
 	}
 
-	url, err := publicDisk.URL(ctx, "avatars/me.png")
+	url, err := manager.MustDisk("public").URL(ctx, "avatars/me.png")
 	if err != nil {
 		log.Fatal(err)
 	}

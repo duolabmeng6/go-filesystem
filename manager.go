@@ -99,6 +99,22 @@ func (m *Manager) Disk(name string) (*Disk, error) {
 	return disk, nil
 }
 
+// MustDisk 返回指定名称的 disk，适合在 disk 名称由代码或配置固定控制时写链式调用。
+//
+//	m.MustDisk("local").Put(ctx, "reports/a.txt", data)
+//	m.MustDisk("s3").Put(ctx, "reports/a.txt", data)
+//	m.MustDisk("oss").Put(ctx, "reports/a.txt", data)
+//
+// 如果 disk 不存在、驱动没有注册或初始化失败，MustDisk 会 panic。disk 名称来自命令行、
+// 环境变量、租户配置或后台表单时，请使用 Disk 并处理返回的 error。
+func (m *Manager) MustDisk(name string) *Disk {
+	disk, err := m.Disk(name)
+	if err != nil {
+		panic(err)
+	}
+	return disk
+}
+
 func (m *Manager) DefaultDisk() (*Disk, error) {
 	m.mu.RLock()
 	name := m.defaultDisk

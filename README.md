@@ -9,23 +9,17 @@ Go 文档地址：<https://pkg.go.dev/github.com/duolabmeng6/go-filesystem>
 `go-filesystem` 最方便的地方是：你可以同时配置本地目录、S3/R2/B2/MinIO、阿里云 OSS，然后明确指定这次文件要写到哪个 disk。
 
 ```go
-localDisk, err := manager.Disk("local")
-if err != nil {
+if err := manager.MustDisk("local").Put(ctx, "reports/a.txt", data); err != nil {
 	return err
 }
-err = localDisk.Put(ctx, "reports/a.txt", data)
 
-s3Disk, err := manager.Disk("s3")
-if err != nil {
+if err := manager.MustDisk("s3").Put(ctx, "reports/a.txt", data); err != nil {
 	return err
 }
-err = s3Disk.Put(ctx, "reports/a.txt", data)
 
-ossDisk, err := manager.Disk("oss")
-if err != nil {
+if err := manager.MustDisk("oss").Put(ctx, "reports/a.txt", data); err != nil {
 	return err
 }
-err = ossDisk.Put(ctx, "reports/a.txt", data)
 ```
 
 ## 安装
@@ -83,23 +77,20 @@ manager, err := filesystem.NewFromConfig(
 再指定写到哪里：
 
 ```go
-localDisk, err := manager.Disk("local")
-if err != nil {
+if err := manager.MustDisk("local").Put(ctx, "reports/local.txt", []byte("local")); err != nil {
 	return err
 }
 
-s3Disk, err := manager.Disk("s3")
-if err != nil {
+if err := manager.MustDisk("s3").Put(ctx, "reports/s3.txt", []byte("s3")); err != nil {
 	return err
 }
 
-ossDisk, err := manager.Disk("oss")
-if err != nil {
+if err := manager.MustDisk("oss").Put(ctx, "reports/oss.txt", []byte("oss")); err != nil {
 	return err
 }
 ```
 
-如果你想通过命令切换，也只是把 disk 名称换成参数：
+如果你想通过命令切换，也只是把 disk 名称换成参数。disk 名称来自外部输入时，用 `Disk` 接住错误：
 
 ```go
 diskName := os.Getenv("FILESYSTEM_DISK")
@@ -177,27 +168,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	localDisk, err := manager.Disk("local")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := localDisk.Put(ctx, "reports/local.txt", []byte("local")); err != nil {
+	if err := manager.MustDisk("local").Put(ctx, "reports/local.txt", []byte("local")); err != nil {
 		log.Fatal(err)
 	}
 
-	s3Disk, err := manager.Disk("s3")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := s3Disk.Put(ctx, "reports/s3.txt", []byte("s3")); err != nil {
+	if err := manager.MustDisk("s3").Put(ctx, "reports/s3.txt", []byte("s3")); err != nil {
 		log.Fatal(err)
 	}
 
-	ossDisk, err := manager.Disk("oss")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := ossDisk.Put(ctx, "reports/oss.txt", []byte("oss")); err != nil {
+	if err := manager.MustDisk("oss").Put(ctx, "reports/oss.txt", []byte("oss")); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -243,16 +222,11 @@ if err != nil {
 	return err
 }
 
-publicDisk, err := manager.Disk("public")
-if err != nil {
+if err := manager.MustDisk("public").Put(ctx, "avatars/me.png", data, filesystem.WithVisibility(filesystem.VisibilityPublic)); err != nil {
 	return err
 }
 
-if err := publicDisk.Put(ctx, "avatars/me.png", data, filesystem.WithVisibility(filesystem.VisibilityPublic)); err != nil {
-	return err
-}
-
-url, err := publicDisk.URL(ctx, "avatars/me.png")
+url, err := manager.MustDisk("public").URL(ctx, "avatars/me.png")
 ```
 
 ### 配置 S3 兼容存储

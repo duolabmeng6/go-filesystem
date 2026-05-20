@@ -9,6 +9,8 @@
 - 文档优先写“怎么使用这个包”，少解释内部结构、实现细节、能力矩阵或设计理念。
 - README 保持简短：Go Reference badge、pkg.go.dev 地址、安装、最小示例、常见用法、中文教程入口。
 - GoDoc 包注释可以中文，且第一段要直接告诉用户怎么开始用，不要写成架构说明。
+- 固定写入某个已配置 disk 的示例，优先写 `manager.MustDisk("local").Put(...)`、`manager.MustDisk("s3").Put(...)`、`manager.MustDisk("oss").Put(...)`，让用户一眼看到可以按名称切换存储。
+- disk 名称来自命令行、环境变量、租户配置或后台表单时，示例必须使用 `manager.Disk(name)` 并处理 error，不要用 `MustDisk`。
 - README 中保留 Go Reference badge：
 
 ```md

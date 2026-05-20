@@ -115,6 +115,30 @@ func TestManagerBuildsDiskWithoutHoldingLock(t *testing.T) {
 	}
 }
 
+func TestMustDiskReturnsDisk(t *testing.T) {
+	m := New()
+	if err := m.RegisterDisk("mem", NewDisk(newMemoryAdapter())); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := m.MustDisk("mem").Put(context.Background(), "a.txt", []byte("a")); err != nil {
+		t.Fatalf("put through must disk: %v", err)
+	}
+	exists, err := m.MustDisk("mem").Exists(context.Background(), "a.txt")
+	if err != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+}
+
+func TestMustDiskPanics(t *testing.T) {
+	m := New()
+	defer func() {
+		if recover() == nil {
+			t.Fatalf("expected panic")
+		}
+	}()
+	_ = m.MustDisk("missing")
+}
+
 func TestReplaceDiskKeepsOldHolder(t *testing.T) {
 	m := New(WithDefaultDisk("mem"))
 	oldDisk := NewDisk(newMemoryAdapter())
