@@ -1,0 +1,30 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go build/test artifacts
+bin/
+build/
+dist/
+*.test
+*.out
+coverage.out
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
