@@ -1,8 +1,8 @@
 // Package filesystem 用统一写法操作本地目录、S3 兼容存储和阿里云 OSS。
 //
-// 推荐一次性配置多个 disk，例如 "local"、"s3"、"oss"。普通业务可以使用默认
-// disk；需要动态切换时，可以根据命令参数、租户配置或后台表单传入的名称调用
-// manager.Disk(name)，把文件写到指定驱动。
+// 推荐一次性配置多个 disk，例如 "local"、"s3"、"oss"。写文件时可以直接指定
+// disk 名称：manager.Disk("local") 写本地，manager.Disk("s3") 写 S3，
+// manager.Disk("oss") 写阿里云 OSS。
 //
 //	manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
 //		Default: "local",
@@ -15,12 +15,16 @@
 //		return err
 //	}
 //
-//	disk, err := manager.Disk("s3")
-//	if err != nil {
+//	if err := putTo(ctx, manager, "s3", "reports/a.txt", []byte("hello")); err != nil {
 //		return err
 //	}
-//	if err := disk.Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
-//		return err
+//
+//	func putTo(ctx context.Context, manager *filesystem.Manager, diskName string, path string, data []byte) error {
+//		disk, err := manager.Disk(diskName)
+//		if err != nil {
+//			return err
+//		}
+//		return disk.Put(ctx, path, data)
 //	}
 //
 // 路径请使用类似 "avatars/me.png" 的相对路径，不要传操作系统绝对路径。

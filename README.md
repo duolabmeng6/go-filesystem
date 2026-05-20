@@ -6,7 +6,13 @@ Go 文档地址：<https://pkg.go.dev/github.com/duolabmeng6/go-filesystem>
 
 许可证：MIT
 
-`go-filesystem` 最方便的地方是：你可以同时配置本地目录、S3/R2/B2/MinIO、阿里云 OSS，然后用一个参数指定本次文件要写到哪个 disk。默认 disk 适合大多数业务；需要动态切换时，也可以直接用 `manager.Disk("s3")` 或 `manager.Disk("oss")` 操作指定驱动。
+`go-filesystem` 最方便的地方是：你可以同时配置本地目录、S3/R2/B2/MinIO、阿里云 OSS，然后明确指定这次文件要写到哪个 disk。
+
+```go
+err := putTo(ctx, manager, "local", "reports/a.txt", data) // 写入本地目录
+err := putTo(ctx, manager, "s3", "reports/a.txt", data)    // 写入 S3/R2/B2/MinIO
+err := putTo(ctx, manager, "oss", "reports/a.txt", data)   // 写入阿里云 OSS
+```
 
 ## 安装
 
@@ -14,9 +20,73 @@ Go 文档地址：<https://pkg.go.dev/github.com/duolabmeng6/go-filesystem>
 go get github.com/duolabmeng6/go-filesystem
 ```
 
-## 同时配置 local、S3、OSS，然后用参数指定存储位置
+## 同时配置 local、S3、OSS
 
-启动时传入这次要使用的 disk 名称：
+先配置三个 disk：
+
+```go
+manager, err := filesystem.NewFromConfig(
+	ctx,
+	filesystem.Config{
+		Default: "local",
+		Disks: map[string]filesystem.DiskConfig{
+			"local": {
+				Driver: "local",
+				Root:   "storage/app",
+			},
+			"s3": {
+				Driver:  "s3",
+				BaseURL: os.Getenv("S3_BASE_URL"),
+				Options: map[string]any{
+					"bucket":            os.Getenv("S3_BUCKET"),
+					"region":            os.Getenv("S3_REGION"),
+					"endpoint":          os.Getenv("S3_ENDPOINT"),
+					"access_key_id":     os.Getenv("S3_ACCESS_KEY_ID"),
+					"access_key_secret": os.Getenv("S3_ACCESS_KEY_SECRET"),
+					"use_path_style":    true,
+					"disable_acl":       true,
+				},
+			},
+			"oss": {
+				Driver:  "oss",
+				BaseURL: os.Getenv("OSS_BASE_URL"),
+				Options: map[string]any{
+					"bucket":            os.Getenv("OSS_BUCKET"),
+					"region":            os.Getenv("OSS_REGION"),
+					"endpoint":          os.Getenv("OSS_ENDPOINT"),
+					"access_key_id":     os.Getenv("OSS_ACCESS_KEY_ID"),
+					"access_key_secret": os.Getenv("OSS_ACCESS_KEY_SECRET"),
+				},
+			},
+		},
+	},
+	filesystem.WithDriver("local", local.NewFactory()),
+	filesystem.WithDriver("s3", s3driver.NewFactory()),
+	filesystem.WithDriver("oss", ossdriver.NewFactory()),
+)
+```
+
+再指定写到哪里：
+
+```go
+err := putTo(ctx, manager, "local", "reports/a.txt", data)
+err := putTo(ctx, manager, "s3", "reports/a.txt", data)
+err := putTo(ctx, manager, "oss", "reports/a.txt", data)
+```
+
+`putTo` 就是按名称取 disk 再写入：
+
+```go
+func putTo(ctx context.Context, manager *filesystem.Manager, diskName string, path string, data []byte) error {
+	disk, err := manager.Disk(diskName)
+	if err != nil {
+		return err
+	}
+	return disk.Put(ctx, path, data)
+}
+```
+
+如果你想通过命令切换，也只是把 disk 名称换成参数：
 
 ```sh
 FILESYSTEM_DISK=local go run .
@@ -24,7 +94,16 @@ FILESYSTEM_DISK=s3 go run .
 FILESYSTEM_DISK=oss go run .
 ```
 
-代码里一次性配置三个 disk，然后按参数取出要操作的那个 disk：
+```go
+diskName := os.Getenv("FILESYSTEM_DISK")
+if diskName == "" {
+	diskName = "local"
+}
+
+err := putTo(ctx, manager, diskName, "reports/a.txt", data)
+```
+
+## 完整示例
 
 ```go
 package main
@@ -42,13 +121,6 @@ import (
 
 func main() {
 	ctx := context.Background()
-
-	// 命令传入本次要操作的 disk 名称：local、s3 或 oss。
-	// 三个 disk 都已配置好，运行时可以按参数动态选择。
-	diskName := os.Getenv("FILESYSTEM_DISK")
-	if diskName == "" {
-		diskName = "local"
-	}
 
 	manager, err := filesystem.NewFromConfig(
 		ctx,
@@ -93,26 +165,27 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// 明确指定本次要写入的 disk。diskName 可以来自命令行参数、环境变量、租户配置或后台表单。
+	if err := putTo(ctx, manager, "local", "reports/local.txt", []byte("local")); err != nil {
+		log.Fatal(err)
+	}
+	if err := putTo(ctx, manager, "s3", "reports/s3.txt", []byte("s3")); err != nil {
+		log.Fatal(err)
+	}
+	if err := putTo(ctx, manager, "oss", "reports/oss.txt", []byte("oss")); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func putTo(ctx context.Context, manager *filesystem.Manager, diskName string, path string, data []byte) error {
 	disk, err := manager.Disk(diskName)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-
-	// 从这里开始就是稳定的业务代码：disk 指向 local 就写本地，指向 s3 就写 S3，指向 oss 就写 OSS。
-	if err := disk.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
-		log.Fatal(err)
-	}
-
-	data, err := disk.Get(ctx, "reports/hello.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("%s", data)
+	return disk.Put(ctx, path, data)
 }
 ```
 
-如果你的业务只需要一个默认存储，也可以直接用 `manager.Put` / `manager.Get`。当需要把不同文件写到不同驱动时，用 `manager.Disk(name)` 拿到指定 disk 再操作。
+如果你的业务只需要一个默认存储，也可以直接用 `manager.Put` / `manager.Get`。
 
 ## 常见配置
 

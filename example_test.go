@@ -38,12 +38,13 @@ func ExampleManager() {
 		log.Fatal(err)
 	}
 
-	// 可以直接指定某个 disk 名称。实际项目里这个名称可以来自命令参数或租户配置。
-	disk, err := manager.Disk("local")
+	// 直接指定 disk 名称即可操作对应驱动。
+	// 配置了 s3 或 oss 后，同样可以写 manager.Disk("s3") 或 manager.Disk("oss")。
+	localDisk, err := manager.Disk("local")
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := disk.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
+	if err := localDisk.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
 		log.Fatal(err)
 	}
 
