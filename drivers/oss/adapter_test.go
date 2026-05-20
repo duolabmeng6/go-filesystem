@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -74,6 +75,22 @@ func TestTemporaryURL(t *testing.T) {
 	}
 	if !strings.Contains(got, "https://signed.example.com/a.txt") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestTemporaryURLWithOSSProcess(t *testing.T) {
+	disk := newTestDisk(t)
+	got, err := disk.TemporaryURL(
+		context.Background(),
+		"a.jpg",
+		time.Now().Add(time.Hour),
+		filesystem.WithURLParameter("x-oss-process", "image/resize,w_800/quality,q_80"),
+	)
+	if err != nil {
+		t.Fatalf("temporary url: %v", err)
+	}
+	if !strings.Contains(got, "x-oss-process=image%2Fresize%2Cw_800%2Fquality%2Cq_80") {
+		t.Fatalf("expected signed url to include x-oss-process, got %q", got)
 	}
 }
 
@@ -270,9 +287,17 @@ func (m *mockClient) Presign(ctx context.Context, request any, optFns ...func(*a
 	if !ok {
 		return nil, errors.New("unsupported presign request")
 	}
+	values := url.Values{}
+	if get.Process != nil {
+		values.Set("x-oss-process", aliyunoss.ToString(get.Process))
+	}
+	rawURL := "https://signed.example.com/" + aliyunoss.ToString(get.Key)
+	if encoded := values.Encode(); encoded != "" {
+		rawURL += "?" + encoded
+	}
 	return &aliyunoss.PresignResult{
 		Method:     http.MethodGet,
-		URL:        "https://signed.example.com/" + aliyunoss.ToString(get.Key),
+		URL:        rawURL,
 		Expiration: time.Now().Add(time.Hour),
 	}, nil
 }

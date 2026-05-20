@@ -247,6 +247,8 @@ func applyOSSURLParameters(request *aliyunoss.GetObjectRequest, parameters map[s
 			request.ResponseContentType = aliyunoss.Ptr(value)
 		case "response-expires":
 			request.ResponseExpires = aliyunoss.Ptr(value)
+		case "x-oss-process":
+			request.Process = aliyunoss.Ptr(value)
 		}
 	}
 }

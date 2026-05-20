@@ -1,16 +1,31 @@
 # go-filesystem
 
-`go-filesystem` is a Go file storage abstraction inspired by Laravel Filesystem / Storage concepts: disks, drivers, default disks, public URLs, visibility, temporary URLs, scoped disks, read-only disks, and fakes for tests.
+`go-filesystem` 是一个 Go-first 的文件存储抽象库，用一套稳定 API 连接本地磁盘、S3 兼容对象存储、阿里云 OSS、只读磁盘、租户前缀、公开 URL、临时下载 URL 和测试 Fake。
 
-The API is Go-first: explicit managers and disks, `context.Context`, streaming I/O, normal `error` returns, and no cloud SDK dependencies in the core package.
+它借鉴了 Laravel Filesystem / Storage 的概念，但 API 按 Go 的习惯设计：显式 `context.Context`、流式 `io.Reader` / `io.ReadCloser`、普通 `error` 返回、小接口、无全局状态依赖，以及可独立扩展的驱动包。
 
-## Install
+## 安装
 
 ```sh
 go get github.com/duolabmeng6/go-filesystem
 ```
 
-## Configure a Manager
+Go 文档地址：<https://pkg.go.dev/github.com/duolabmeng6/go-filesystem>
+
+常用包：
+
+```go
+import (
+	"github.com/duolabmeng6/go-filesystem"
+	"github.com/duolabmeng6/go-filesystem/local"
+	s3driver "github.com/duolabmeng6/go-filesystem/drivers/s3"
+	ossdriver "github.com/duolabmeng6/go-filesystem/drivers/oss"
+)
+```
+
+核心包的公开 API 不绑定云厂商 SDK；云存储能力放在 `drivers/s3` 和 `drivers/oss`。
+
+## 快速开始
 
 ```go
 package main
@@ -45,81 +60,121 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := manager.Put(ctx, "reports/a.txt", []byte("hello")); err != nil {
+	if err := manager.Put(ctx, "reports/hello.txt", []byte("hello")); err != nil {
 		log.Fatal(err)
 	}
+
+	publicDisk, err := manager.Disk("public")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := publicDisk.Put(ctx, "avatars/me.png", []byte("png"), filesystem.WithVisibility(filesystem.VisibilityPublic)); err != nil {
+		log.Fatal(err)
+	}
+
+	url, err := publicDisk.URL(ctx, "avatars/me.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(url) // /storage/avatars/me.png
 }
 ```
 
-`BaseURL` only generates URL strings. Your application still needs an HTTP server, reverse proxy, framework route, or CDN that serves the configured root directory.
+## 核心能力
 
-## Named Disks
+- `Manager`：管理默认 disk、命名 disk、驱动注册、懒加载构建和测试替换。
+- `Disk`：业务代码使用的读写、列表、复制、移动、元数据、visibility、URL 和临时 URL API。
+- `Adapter`：驱动接口，本地磁盘、S3、OSS 或自定义存储都实现它。
+- `Scoped`：给底层 adapter 自动加路径前缀，例如 `tenants/acme`。
+- `ReadOnly`：保留读取和 URL 能力，写入、删除、移动等变更操作返回 `ErrReadOnly`。
+- `Fake`：测试中替换 manager 的某个 disk，并在 `t.Cleanup` 自动恢复。
+- `filesystemtest`：给自定义驱动复用的合约测试。
+
+## 已支持驱动
+
+| 驱动 | 包 | 说明 |
+| --- | --- | --- |
+| Local | `local` | 真实目录、默认原子写入、基于权限的 visibility、可选临时 URL builder。 |
+| AWS S3 / S3-compatible | `drivers/s3` | AWS SDK for Go v2、自定义 endpoint、path-style、临时 URL、可禁用 ACL。 |
+| Aliyun OSS | `drivers/oss` | OSS SDK v2、对象 ACL visibility、公开 URL、临时下载 URL。 |
+
+Cloudflare R2、Backblaze B2 等 S3-compatible 服务通常应设置 `DisableACL: true`，公开/私有访问交给 bucket policy、CDN 或应用鉴权处理。
+
+## 常用操作
 
 ```go
-publicDisk, err := manager.Disk("public")
-if err != nil {
-	return err
-}
+ctx := context.Background()
 
-if err := publicDisk.Put(ctx, "avatars/me.png", data, filesystem.WithVisibility(filesystem.VisibilityPublic)); err != nil {
-	return err
-}
+err := disk.Put(ctx, "docs/readme.txt", []byte("hello"))
+data, err := disk.Get(ctx, "docs/readme.txt")
 
-url, err := publicDisk.URL(ctx, "avatars/me.png")
-```
-
-URL paths are escaped per segment, so `docs/hello world#1.txt` becomes `/storage/docs/hello%20world%231.txt`.
-
-## Streaming I/O
-
-```go
 file, err := os.Open("large-video.mp4")
-if err != nil {
-	return err
+if err == nil {
+	defer file.Close()
+	err = disk.Write(ctx, "videos/large-video.mp4", file)
 }
-defer file.Close()
 
-err = manager.Write(ctx, "videos/large-video.mp4", file)
+exists, err := disk.Exists(ctx, "docs/readme.txt")
+info, err := disk.Stat(ctx, "docs/readme.txt")
+mime, err := disk.MimeType(ctx, "docs/readme.txt")
+
+err = disk.Copy(ctx, "docs/readme.txt", "docs/readme-copy.txt")
+err = disk.Move(ctx, "docs/readme-copy.txt", "archive/readme.txt")
+err = disk.DeleteIfExists(ctx, "archive/readme.txt")
+
+files, err := disk.AllFiles(ctx, "docs")
+url, err := disk.URL(ctx, "docs/readme.txt")
+temporaryURL, err := disk.TemporaryURL(ctx, "docs/readme.txt", time.Now().Add(15*time.Minute))
 ```
 
-## Temporary URLs
+路径是对象存储风格的相对路径，不是 OS 绝对路径。推荐使用 `avatars/user-1.png` 这种 slash path；库会拒绝绝对路径、`..`、`.`、重复斜杠、反斜杠、控制字符、Windows drive/UNC 路径、冒号段和 Windows 保留名。
 
-The local driver supports temporary URLs only when a builder is configured.
+## 配置示例
 
 ```go
-disk, err := local.NewDisk(local.Config{
-	Root: "/srv/private",
-	TemporaryURLBuilder: func(ctx context.Context, path string, expiresAt time.Time, opts filesystem.URLOptions) (string, error) {
-		return signDownloadURL(path, expiresAt), nil
+manager := filesystem.New(filesystem.WithDefaultDisk("s3"))
+manager.MustExtend("local", local.NewFactory())
+manager.MustExtend("s3", s3driver.NewFactory())
+
+err := manager.ConfigureDisk("s3", filesystem.DiskConfig{
+	Driver:  "s3",
+	BaseURL: "https://cdn.example.com",
+	Options: map[string]any{
+		"bucket":            "my-bucket",
+		"region":            "us-east-1",
+		"endpoint":          "https://s3.example.com",
+		"access_key_id":     os.Getenv("S3_ACCESS_KEY_ID"),
+		"access_key_secret": os.Getenv("S3_ACCESS_KEY_SECRET"),
+		"use_path_style":    true,
+		"disable_acl":       true,
 	},
 })
-if err != nil {
-	return err
-}
-
-url, err := disk.TemporaryURL(ctx, "invoices/a.pdf", time.Now().Add(15*time.Minute))
 ```
 
-## Scoped and Read-Only Disks
+在纯 Go 代码里，也可以优先使用驱动的强类型配置：
 
 ```go
-base, err := local.New(local.Config{Root: "storage/app"})
-if err != nil {
-	return err
-}
-
-scopedAdapter, err := filesystem.Scoped(base, "tenants/acme")
-if err != nil {
-	return err
-}
-
-tenantDisk := filesystem.NewDisk(scopedAdapter)
-readOnlyDisk := filesystem.NewDisk(filesystem.ReadOnly(scopedAdapter))
+disk, err := s3driver.NewDisk(context.Background(), s3driver.Config{
+	Bucket:          "my-bucket",
+	Region:          "us-east-1",
+	Endpoint:        "https://s3.example.com",
+	AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
+	AccessKeySecret: os.Getenv("S3_ACCESS_KEY_SECRET"),
+	BaseURL:         "https://cdn.example.com",
+	UsePathStyle:    true,
+	DisableACL:      true,
+})
 ```
 
-`Scoped` applies a prefix before calling the underlying adapter and strips the prefix from list results. `ReadOnly` preserves read capabilities and returns `ErrReadOnly` for writes, deletes, moves, directory changes, and visibility changes.
+`BaseURL` 只负责生成 URL 字符串。真正能否访问，取决于应用路由、反向代理、对象存储公开策略或 CDN 配置。
 
-## Fakes for Tests
+## 测试
+
+```sh
+go test ./...
+```
+
+业务测试可以用 Fake 替换配置好的 disk：
 
 ```go
 func TestUpload(t *testing.T) {
@@ -129,8 +184,7 @@ func TestUpload(t *testing.T) {
 
 	fake := filesystem.Fake(t, manager, "local")
 
-	err := manager.Put(context.Background(), "avatars/me.png", []byte("png"))
-	if err != nil {
+	if err := manager.Put(context.Background(), "avatars/me.png", []byte("png")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,104 +193,18 @@ func TestUpload(t *testing.T) {
 }
 ```
 
-`Fake` restores the previous disk during `t.Cleanup`. `PersistentFake` uses a root you provide and keeps files on disk for debugging.
+## 文档
 
-## Local Driver Notes
+- [文档索引](docs/readme.md)
+- [快速入门](docs/quick-start.md)
+- [配置](docs/configuration.md)
+- [部署](docs/deployment.md)
+- [驱动](docs/drivers.md)
+- [测试](docs/testing.md)
+- [设计与路径安全](docs/design.md)
 
-- Paths are object-storage style slash paths, not OS absolute paths.
-- Empty paths are accepted only for listing the root.
-- `..`, `.`, repeated slashes, backslashes, NUL/control characters, Windows drive/UNC paths, colon segments, and Windows reserved names are rejected.
-- Local roots are resolved at initialization; existing symlink segments under the root are rejected for reads, writes, deletes, and listing.
-- Symlink protection is a best-effort application-level guard, not a strong sandbox.
-- Writes are atomic by default: data is written to a temporary file in the destination directory, chmod is applied, then the file is renamed into place.
-- `WithOverwrite(false)` makes writes fail with `ErrAlreadyExists` when the target file already exists; it is not a cross-process race-free lock.
-- Local filesystem calls are best-effort with context cancellation; long streaming copies check context between read/write chunks.
+## 当前范围
 
-## Driver Contracts
+已实现：local、S3-compatible、OSS、scoped disk、read-only disk、fake、合约测试、URL 生成、临时下载 URL、provider 支持时的 visibility、copy/move fallback、路径规范化。
 
-The `filesystemtest` package contains reusable contract tests for drivers:
-
-```go
-func TestDriverContracts(t *testing.T) {
-	filesystemtest.RunObjectContract(t, newDisk)
-	filesystemtest.RunDirectoryContract(t, newDisk)
-	filesystemtest.RunListContract(t, newDisk)
-	filesystemtest.RunVisibilityContract(t, newDisk)
-	filesystemtest.RunPathSafetyContract(t, newDisk)
-}
-```
-
-Future S3, SFTP, OSS, COS, Qiniu, and other drivers can live in separate packages or modules and register with `Manager.Extend`.
-
-## AWS S3
-
-S3 support lives outside the core package in `drivers/s3` and uses AWS SDK for Go v2.
-
-```go
-import s3driver "github.com/duolabmeng6/go-filesystem/drivers/s3"
-
-manager := filesystem.New(filesystem.WithDefaultDisk("s3"))
-manager.MustExtend("s3", s3driver.NewFactory())
-
-_ = manager.ConfigureDisk("s3", filesystem.DiskConfig{
-	Driver:  "s3",
-	BaseURL: "https://cdn.example.com",
-	Options: map[string]any{
-		"bucket":            "my-bucket",
-		"region":            "us-east-1",
-		"access_key_id":     os.Getenv("S3_ACCESS_KEY_ID"),
-		"access_key_secret": os.Getenv("S3_ACCESS_KEY_SECRET"),
-		"use_path_style":    false,
-	},
-})
-```
-
-Typed config is preferred in Go code:
-
-```go
-disk, err := s3driver.NewDisk(context.Background(), s3driver.Config{
-	Bucket:          "my-bucket",
-	Region:          "us-east-1",
-	AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
-	AccessKeySecret: os.Getenv("S3_ACCESS_KEY_SECRET"),
-	BaseURL:         "https://cdn.example.com",
-	Visibility:      filesystem.VisibilityPrivate,
-})
-```
-
-For S3-compatible services, set `Endpoint` and usually `UsePathStyle`.
-
-## Aliyun OSS
-
-OSS support lives outside the core package in `drivers/oss`.
-
-```go
-import ossdriver "github.com/duolabmeng6/go-filesystem/drivers/oss"
-
-manager := filesystem.New(filesystem.WithDefaultDisk("oss"))
-manager.MustExtend("oss", ossdriver.NewFactory())
-
-_ = manager.ConfigureDisk("oss", filesystem.DiskConfig{
-	Driver:  "oss",
-	BaseURL: "https://cdn.example.com",
-	Options: map[string]any{
-		"bucket":            "my-bucket",
-		"region":            "cn-hangzhou",
-		"access_key_id":     os.Getenv("OSS_ACCESS_KEY_ID"),
-		"access_key_secret": os.Getenv("OSS_ACCESS_KEY_SECRET"),
-	},
-})
-```
-
-For Go code, prefer the typed config:
-
-```go
-disk, err := ossdriver.NewDisk(ossdriver.Config{
-	Bucket:          "my-bucket",
-	Region:          "cn-hangzhou",
-	AccessKeyID:     os.Getenv("OSS_ACCESS_KEY_ID"),
-	AccessKeySecret: os.Getenv("OSS_ACCESS_KEY_SECRET"),
-	BaseURL:         "https://cdn.example.com",
-	Visibility:      filesystem.VisibilityPrivate,
-})
-```
+暂未实现：multipart upload、provider 原生 batch delete、自定义对象 metadata/header 写入选项、storage class/tagging/encryption、presigned upload URL、SFTP/COS/Qiniu/WebDAV 驱动、CI workflow。
