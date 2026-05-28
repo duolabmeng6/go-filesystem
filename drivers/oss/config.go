@@ -29,9 +29,15 @@ type Config struct {
 
 type Client interface {
 	PutObject(ctx context.Context, request *oss.PutObjectRequest, optFns ...func(*oss.Options)) (*oss.PutObjectResult, error)
+	InitiateMultipartUpload(ctx context.Context, request *oss.InitiateMultipartUploadRequest, optFns ...func(*oss.Options)) (*oss.InitiateMultipartUploadResult, error)
+	UploadPart(ctx context.Context, request *oss.UploadPartRequest, optFns ...func(*oss.Options)) (*oss.UploadPartResult, error)
+	ListParts(ctx context.Context, request *oss.ListPartsRequest, optFns ...func(*oss.Options)) (*oss.ListPartsResult, error)
+	CompleteMultipartUpload(ctx context.Context, request *oss.CompleteMultipartUploadRequest, optFns ...func(*oss.Options)) (*oss.CompleteMultipartUploadResult, error)
+	AbortMultipartUpload(ctx context.Context, request *oss.AbortMultipartUploadRequest, optFns ...func(*oss.Options)) (*oss.AbortMultipartUploadResult, error)
 	GetObject(ctx context.Context, request *oss.GetObjectRequest, optFns ...func(*oss.Options)) (*oss.GetObjectResult, error)
 	HeadObject(ctx context.Context, request *oss.HeadObjectRequest, optFns ...func(*oss.Options)) (*oss.HeadObjectResult, error)
 	DeleteObject(ctx context.Context, request *oss.DeleteObjectRequest, optFns ...func(*oss.Options)) (*oss.DeleteObjectResult, error)
+	DeleteMultipleObjects(ctx context.Context, request *oss.DeleteMultipleObjectsRequest, optFns ...func(*oss.Options)) (*oss.DeleteMultipleObjectsResult, error)
 	CopyObject(ctx context.Context, request *oss.CopyObjectRequest, optFns ...func(*oss.Options)) (*oss.CopyObjectResult, error)
 	ListObjectsV2(ctx context.Context, request *oss.ListObjectsV2Request, optFns ...func(*oss.Options)) (*oss.ListObjectsV2Result, error)
 	PutObjectAcl(ctx context.Context, request *oss.PutObjectAclRequest, optFns ...func(*oss.Options)) (*oss.PutObjectAclResult, error)
@@ -76,7 +82,7 @@ func New(config Config) (*Adapter, error) {
 		baseURL:      trimBaseURL(config.BaseURL),
 		urlEnabled:   config.BaseURL != "",
 		visibility:   config.Visibility,
-		capabilities: filesystem.NewCapabilitySet(filesystem.CapabilityCopy, filesystem.CapabilityTemporaryURL, filesystem.CapabilityVisibility, filesystem.CapabilityURL),
+		capabilities: filesystem.NewCapabilitySet(filesystem.CapabilityCopy, filesystem.CapabilityTemporaryURL, filesystem.CapabilityVisibility, filesystem.CapabilityURL, filesystem.CapabilityMultipart),
 	}
 	if config.BaseURL == "" {
 		delete(adapter.capabilities, filesystem.CapabilityURL)
@@ -132,7 +138,7 @@ func (c Config) withDefaults() (Config, error) {
 		return c, fmt.Errorf("%w: oss region or endpoint is required", filesystem.ErrInvalidPath)
 	}
 	if c.Visibility == "" {
-		c.Visibility = filesystem.VisibilityPrivate
+		c.Visibility = filesystem.VisibilityDefault
 	}
 	if !c.Visibility.Valid() {
 		return c, filesystem.ErrInvalidVisibility

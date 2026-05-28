@@ -316,7 +316,7 @@ func mapError(err error) error {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
-		case "NoSuchKey", "NotFound", "NoSuchBucket", "404":
+		case "NoSuchKey", "NoSuchUpload", "NotFound", "NoSuchBucket", "404":
 			return fmt.Errorf("%w: %s", filesystem.ErrNotFound, apiErr.ErrorCode())
 		case "PreconditionFailed", "ConditionalRequestConflict", "ObjectAlreadyExists", "412":
 			return fmt.Errorf("%w: %s", filesystem.ErrAlreadyExists, apiErr.ErrorCode())

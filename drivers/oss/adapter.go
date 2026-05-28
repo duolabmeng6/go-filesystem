@@ -15,7 +15,10 @@ import (
 	"github.com/duolabmeng6/go-filesystem"
 )
 
-const defaultPageSize = 1000
+const (
+	defaultPageSize        = 1000
+	deleteObjectsBatchSize = 1000
+)
 
 type Adapter struct {
 	client       Client
@@ -82,6 +85,53 @@ func (a *Adapter) Delete(ctx context.Context, path string) error {
 		Key:    aliyunoss.Ptr(path),
 	})
 	return mapError(err)
+}
+
+func (a *Adapter) DeleteMany(ctx context.Context, paths []string, opts filesystem.DeleteOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	if !opts.IgnoreMissing {
+		var multi filesystem.MultiError
+		multi.Op = "delete many"
+		for _, path := range paths {
+			err := a.Delete(ctx, path)
+			if err != nil {
+				multi.Errors = append(multi.Errors, filesystem.PathError{Path: path, Err: err})
+			}
+		}
+		if len(multi.Errors) > 0 {
+			return &multi
+		}
+		return nil
+	}
+	for start := 0; start < len(paths); start += deleteObjectsBatchSize {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := start + deleteObjectsBatchSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		objects := make([]aliyunoss.ObjectIdentifier, 0, end-start)
+		for _, path := range paths[start:end] {
+			objects = append(objects, aliyunoss.ObjectIdentifier{Key: aliyunoss.Ptr(path)})
+		}
+		_, err := a.client.DeleteMultipleObjects(ctx, &aliyunoss.DeleteMultipleObjectsRequest{
+			Bucket: aliyunoss.Ptr(a.bucket),
+			Delete: &aliyunoss.Delete{
+				Objects: objects,
+				Quiet:   true,
+			},
+		})
+		if err != nil {
+			return mapError(err)
+		}
+	}
+	return nil
 }
 
 func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
@@ -195,6 +245,7 @@ func (a *Adapter) Copy(ctx context.Context, src string, dst string) error {
 		Key:          aliyunoss.Ptr(dst),
 		SourceBucket: aliyunoss.Ptr(a.bucket),
 		SourceKey:    aliyunoss.Ptr(src),
+		Acl:          objectACL(a.visibility),
 	})
 	return mapError(err)
 }
@@ -270,7 +321,7 @@ func (a *Adapter) GetVisibility(ctx context.Context, path string) (filesystem.Vi
 	case string(aliyunoss.ObjectACLPrivate):
 		return filesystem.VisibilityPrivate, nil
 	case "", string(aliyunoss.ObjectACLDefault):
-		return a.visibility, nil
+		return filesystem.VisibilityDefault, nil
 	default:
 		return "", filesystem.ErrUnsupported
 	}
@@ -320,6 +371,9 @@ func objectACL(visibility filesystem.Visibility) aliyunoss.ObjectACLType {
 	if visibility == filesystem.VisibilityPublic {
 		return aliyunoss.ObjectACLPublicRead
 	}
+	if visibility == filesystem.VisibilityDefault {
+		return aliyunoss.ObjectACLDefault
+	}
 	return aliyunoss.ObjectACLPrivate
 }
 
@@ -339,7 +393,7 @@ func mapError(err error) error {
 			return fmt.Errorf("%w: %s", filesystem.ErrAlreadyExists, serviceErr.Code)
 		}
 		switch serviceErr.Code {
-		case "NoSuchKey", "NoSuchBucket", "NotFound":
+		case "NoSuchKey", "NoSuchUpload", "NoSuchBucket", "NotFound":
 			return fmt.Errorf("%w: %s", filesystem.ErrNotFound, serviceErr.Code)
 		case "FileAlreadyExists", "ObjectAlreadyExists":
 			return fmt.Errorf("%w: %s", filesystem.ErrAlreadyExists, serviceErr.Code)

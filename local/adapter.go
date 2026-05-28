@@ -60,6 +60,7 @@ func New(config Config) (*Adapter, error) {
 		filesystem.CapabilityMove,
 		filesystem.CapabilityDirectory,
 		filesystem.CapabilityVisibility,
+		filesystem.CapabilityMultipart,
 	)
 	if config.BaseURL != "" {
 		caps[filesystem.CapabilityURL] = struct{}{}

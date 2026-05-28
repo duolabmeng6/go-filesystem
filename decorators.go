@@ -38,6 +38,26 @@ func (a *scopedAdapter) Delete(ctx context.Context, path string) error {
 	return a.adapter.Delete(ctx, a.apply(path))
 }
 
+func (a *scopedAdapter) DeleteMany(ctx context.Context, paths []string, opts DeleteOptions) error {
+	deleter, ok := a.adapter.(BulkDeleter)
+	if !ok {
+		return ErrUnsupported
+	}
+	applied := make([]string, len(paths))
+	for i, path := range paths {
+		applied[i] = a.apply(path)
+	}
+	err := deleter.DeleteMany(ctx, applied, opts)
+	if multi, ok := err.(*MultiError); ok {
+		stripped := &MultiError{Op: multi.Op, Errors: make([]PathError, len(multi.Errors))}
+		for i, pathErr := range multi.Errors {
+			stripped.Errors[i] = PathError{Path: a.strip(pathErr.Path), Err: pathErr.Err}
+		}
+		return stripped
+	}
+	return err
+}
+
 func (a *scopedAdapter) Exists(ctx context.Context, path string) (bool, error) {
 	return a.adapter.Exists(ctx, a.apply(path))
 }
@@ -135,6 +155,48 @@ func (a *scopedAdapter) SetVisibility(ctx context.Context, path string, visibili
 	return controller.SetVisibility(ctx, a.apply(path), visibility)
 }
 
+func (a *scopedAdapter) CreateMultipartUpload(ctx context.Context, path string, opts WriteOptions) (MultipartUpload, error) {
+	uploader, ok := a.adapter.(MultipartUploader)
+	if !ok {
+		return MultipartUpload{}, ErrUnsupported
+	}
+	upload, err := uploader.CreateMultipartUpload(ctx, a.apply(path), opts)
+	upload.Path = a.strip(upload.Path)
+	return upload, err
+}
+
+func (a *scopedAdapter) UploadPart(ctx context.Context, path string, uploadID string, partNumber int, r io.Reader, size int64) (MultipartUploadPart, error) {
+	uploader, ok := a.adapter.(MultipartUploader)
+	if !ok {
+		return MultipartUploadPart{}, ErrUnsupported
+	}
+	return uploader.UploadPart(ctx, a.apply(path), uploadID, partNumber, r, size)
+}
+
+func (a *scopedAdapter) ListMultipartUploadParts(ctx context.Context, path string, uploadID string) ([]MultipartUploadPart, error) {
+	uploader, ok := a.adapter.(MultipartUploader)
+	if !ok {
+		return nil, ErrUnsupported
+	}
+	return uploader.ListMultipartUploadParts(ctx, a.apply(path), uploadID)
+}
+
+func (a *scopedAdapter) CompleteMultipartUpload(ctx context.Context, path string, uploadID string, parts []MultipartUploadPart, opts WriteOptions) error {
+	uploader, ok := a.adapter.(MultipartUploader)
+	if !ok {
+		return ErrUnsupported
+	}
+	return uploader.CompleteMultipartUpload(ctx, a.apply(path), uploadID, parts, opts)
+}
+
+func (a *scopedAdapter) AbortMultipartUpload(ctx context.Context, path string, uploadID string) error {
+	uploader, ok := a.adapter.(MultipartUploader)
+	if !ok {
+		return ErrUnsupported
+	}
+	return uploader.AbortMultipartUpload(ctx, a.apply(path), uploadID)
+}
+
 func (a *scopedAdapter) apply(path string) string {
 	if path == "" {
 		return a.prefix
@@ -182,7 +244,7 @@ func (a *readOnlyAdapter) ListPage(ctx context.Context, prefix string, opts List
 }
 
 func (a *readOnlyAdapter) Capabilities() CapabilitySet {
-	return a.adapter.Capabilities().Without(CapabilityCopy, CapabilityMove, CapabilityDirectory)
+	return a.adapter.Capabilities().Without(CapabilityCopy, CapabilityMove, CapabilityDirectory, CapabilityMultipart)
 }
 
 func (a *readOnlyAdapter) Copy(context.Context, string, string) error {
@@ -234,6 +296,30 @@ func (a *readOnlyAdapter) GetVisibility(ctx context.Context, path string) (Visib
 }
 
 func (a *readOnlyAdapter) SetVisibility(context.Context, string, Visibility) error {
+	return ErrReadOnly
+}
+
+func (a *readOnlyAdapter) CreateMultipartUpload(context.Context, string, WriteOptions) (MultipartUpload, error) {
+	return MultipartUpload{}, ErrReadOnly
+}
+
+func (a *readOnlyAdapter) UploadPart(context.Context, string, string, int, io.Reader, int64) (MultipartUploadPart, error) {
+	return MultipartUploadPart{}, ErrReadOnly
+}
+
+func (a *readOnlyAdapter) ListMultipartUploadParts(ctx context.Context, path string, uploadID string) ([]MultipartUploadPart, error) {
+	uploader, ok := a.adapter.(MultipartUploader)
+	if !ok {
+		return nil, ErrUnsupported
+	}
+	return uploader.ListMultipartUploadParts(ctx, path, uploadID)
+}
+
+func (a *readOnlyAdapter) CompleteMultipartUpload(context.Context, string, string, []MultipartUploadPart, WriteOptions) error {
+	return ErrReadOnly
+}
+
+func (a *readOnlyAdapter) AbortMultipartUpload(context.Context, string, string) error {
 	return ErrReadOnly
 }
 

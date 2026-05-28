@@ -30,6 +30,7 @@ func TestContracts(t *testing.T) {
 	filesystemtest.RunPathSafetyContract(t, newTestDisk)
 	filesystemtest.RunURLContract(t, newTestDisk)
 	filesystemtest.RunTemporaryURLContract(t, newTestDisk)
+	filesystemtest.RunMultipartContract(t, newTestDisk)
 }
 
 func TestTemporaryURLBuilder(t *testing.T) {

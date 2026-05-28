@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const deleteDirectoryBatchSize = 1000
+
 type Disk struct {
 	name    string
 	adapter Adapter
@@ -73,6 +75,122 @@ func (d *Disk) Write(ctx context.Context, p string, r io.Reader, opts ...WriteOp
 	return newOpError("write", d.name, normalized, d.adapter.Write(ctx, normalized, r, options))
 }
 
+func (d *Disk) CreateMultipartUpload(ctx context.Context, p string, opts ...WriteOption) (MultipartUpload, error) {
+	if err := ctx.Err(); err != nil {
+		return MultipartUpload{}, err
+	}
+	normalized, err := normalizeNonEmptyPath(p)
+	if err != nil {
+		return MultipartUpload{}, newOpError("create multipart upload", d.name, p, err)
+	}
+	options, err := applyWriteOptions(opts)
+	if err != nil {
+		return MultipartUpload{}, newOpError("create multipart upload", d.name, normalized, err)
+	}
+	if isReadOnlyAdapter(d.adapter) {
+		return MultipartUpload{}, newOpError("create multipart upload", d.name, normalized, ErrReadOnly)
+	}
+	uploader, ok := d.adapter.(MultipartUploader)
+	if !ok || !d.adapter.Capabilities().Has(CapabilityMultipart) {
+		return MultipartUpload{}, newOpError("create multipart upload", d.name, normalized, ErrUnsupported)
+	}
+	upload, err := uploader.CreateMultipartUpload(ctx, normalized, options)
+	return upload, newOpError("create multipart upload", d.name, normalized, err)
+}
+
+func (d *Disk) UploadPart(ctx context.Context, p string, uploadID string, partNumber int, r io.Reader, size int64) (MultipartUploadPart, error) {
+	if err := ctx.Err(); err != nil {
+		return MultipartUploadPart{}, err
+	}
+	normalized, err := normalizeNonEmptyPath(p)
+	if err != nil {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, p, err)
+	}
+	if strings.TrimSpace(uploadID) == "" {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, normalized, fmt.Errorf("%w: upload id is required", ErrInvalidPath))
+	}
+	if partNumber < 1 || partNumber > 10000 {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, normalized, fmt.Errorf("%w: part number must be between 1 and 10000", ErrInvalidPath))
+	}
+	if size < -1 {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, normalized, fmt.Errorf("%w: part size must be -1 or greater", ErrInvalidPath))
+	}
+	if r == nil {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, normalized, fmt.Errorf("%w: nil reader", ErrInvalidPath))
+	}
+	if isReadOnlyAdapter(d.adapter) {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, normalized, ErrReadOnly)
+	}
+	uploader, ok := d.adapter.(MultipartUploader)
+	if !ok || !d.adapter.Capabilities().Has(CapabilityMultipart) {
+		return MultipartUploadPart{}, newOpError("upload part", d.name, normalized, ErrUnsupported)
+	}
+	part, err := uploader.UploadPart(ctx, normalized, uploadID, partNumber, r, size)
+	return part, newOpError("upload part", d.name, normalized, err)
+}
+
+func (d *Disk) ListMultipartUploadParts(ctx context.Context, p string, uploadID string) ([]MultipartUploadPart, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	normalized, err := normalizeNonEmptyPath(p)
+	if err != nil {
+		return nil, newOpError("list multipart upload parts", d.name, p, err)
+	}
+	if strings.TrimSpace(uploadID) == "" {
+		return nil, newOpError("list multipart upload parts", d.name, normalized, fmt.Errorf("%w: upload id is required", ErrInvalidPath))
+	}
+	uploader, ok := d.adapter.(MultipartUploader)
+	if !ok || !d.adapter.Capabilities().Has(CapabilityMultipart) {
+		return nil, newOpError("list multipart upload parts", d.name, normalized, ErrUnsupported)
+	}
+	parts, err := uploader.ListMultipartUploadParts(ctx, normalized, uploadID)
+	return parts, newOpError("list multipart upload parts", d.name, normalized, err)
+}
+
+func (d *Disk) CompleteMultipartUpload(ctx context.Context, p string, uploadID string, parts []MultipartUploadPart, opts ...WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	normalized, err := normalizeNonEmptyPath(p)
+	if err != nil {
+		return newOpError("complete multipart upload", d.name, p, err)
+	}
+	if strings.TrimSpace(uploadID) == "" {
+		return newOpError("complete multipart upload", d.name, normalized, fmt.Errorf("%w: upload id is required", ErrInvalidPath))
+	}
+	options, err := applyWriteOptions(opts)
+	if err != nil {
+		return newOpError("complete multipart upload", d.name, normalized, err)
+	}
+	if isReadOnlyAdapter(d.adapter) {
+		return newOpError("complete multipart upload", d.name, normalized, ErrReadOnly)
+	}
+	uploader, ok := d.adapter.(MultipartUploader)
+	if !ok || !d.adapter.Capabilities().Has(CapabilityMultipart) {
+		return newOpError("complete multipart upload", d.name, normalized, ErrUnsupported)
+	}
+	return newOpError("complete multipart upload", d.name, normalized, uploader.CompleteMultipartUpload(ctx, normalized, uploadID, parts, options))
+}
+
+func (d *Disk) AbortMultipartUpload(ctx context.Context, p string, uploadID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	normalized, err := normalizeNonEmptyPath(p)
+	if err != nil {
+		return newOpError("abort multipart upload", d.name, p, err)
+	}
+	if strings.TrimSpace(uploadID) == "" {
+		return newOpError("abort multipart upload", d.name, normalized, fmt.Errorf("%w: upload id is required", ErrInvalidPath))
+	}
+	uploader, ok := d.adapter.(MultipartUploader)
+	if !ok || !d.adapter.Capabilities().Has(CapabilityMultipart) {
+		return newOpError("abort multipart upload", d.name, normalized, ErrUnsupported)
+	}
+	return newOpError("abort multipart upload", d.name, normalized, uploader.AbortMultipartUpload(ctx, normalized, uploadID))
+}
+
 func (d *Disk) Get(ctx context.Context, p string) ([]byte, error) {
 	rc, err := d.Open(ctx, p)
 	if err != nil {
@@ -123,9 +241,32 @@ func (d *Disk) DeleteMany(ctx context.Context, paths []string, opts ...DeleteOpt
 		return err
 	}
 	options := applyDeleteOptions(opts)
+	normalizedPaths := make([]string, 0, len(paths))
 	var multi MultiError
 	multi.Op = "delete many"
 	for _, p := range paths {
+		normalized, err := normalizeNonEmptyPath(p)
+		if err != nil {
+			multi.Errors = append(multi.Errors, PathError{Path: p, Err: err})
+			continue
+		}
+		normalizedPaths = append(normalizedPaths, normalized)
+	}
+	if len(normalizedPaths) > 0 && options.IgnoreMissing {
+		if bulk, ok := d.adapter.(BulkDeleter); ok {
+			err := bulk.DeleteMany(ctx, normalizedPaths, options)
+			if err == nil {
+				if len(multi.Errors) == 0 {
+					return nil
+				}
+				return &multi
+			}
+			if !errors.Is(err, ErrUnsupported) {
+				return err
+			}
+		}
+	}
+	for _, p := range normalizedPaths {
 		err := d.Delete(ctx, p)
 		if err == nil {
 			continue
@@ -512,17 +653,29 @@ func (d *Disk) DeleteDirectory(ctx context.Context, dir string) error {
 		return err
 	}
 	defer it.Close()
+	batch := make([]string, 0, deleteDirectoryBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := d.DeleteMany(ctx, batch, WithIgnoreMissing())
+		batch = batch[:0]
+		return err
+	}
 	for {
 		entry, err := it.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			return nil
+			return flush()
 		}
 		if err != nil {
 			return err
 		}
 		if entry.Type == EntryFile {
-			if err := d.Delete(ctx, entry.Path); err != nil {
-				return err
+			batch = append(batch, entry.Path)
+			if len(batch) >= deleteDirectoryBatchSize {
+				if err := flush(); err != nil {
+					return err
+				}
 			}
 		}
 	}

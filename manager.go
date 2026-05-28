@@ -255,6 +255,46 @@ func (m *Manager) Write(ctx context.Context, path string, r io.Reader, opts ...W
 	return disk.Write(ctx, path, r, opts...)
 }
 
+func (m *Manager) CreateMultipartUpload(ctx context.Context, path string, opts ...WriteOption) (MultipartUpload, error) {
+	disk, err := m.DefaultDisk()
+	if err != nil {
+		return MultipartUpload{}, err
+	}
+	return disk.CreateMultipartUpload(ctx, path, opts...)
+}
+
+func (m *Manager) UploadPart(ctx context.Context, path string, uploadID string, partNumber int, r io.Reader, size int64) (MultipartUploadPart, error) {
+	disk, err := m.DefaultDisk()
+	if err != nil {
+		return MultipartUploadPart{}, err
+	}
+	return disk.UploadPart(ctx, path, uploadID, partNumber, r, size)
+}
+
+func (m *Manager) ListMultipartUploadParts(ctx context.Context, path string, uploadID string) ([]MultipartUploadPart, error) {
+	disk, err := m.DefaultDisk()
+	if err != nil {
+		return nil, err
+	}
+	return disk.ListMultipartUploadParts(ctx, path, uploadID)
+}
+
+func (m *Manager) CompleteMultipartUpload(ctx context.Context, path string, uploadID string, parts []MultipartUploadPart, opts ...WriteOption) error {
+	disk, err := m.DefaultDisk()
+	if err != nil {
+		return err
+	}
+	return disk.CompleteMultipartUpload(ctx, path, uploadID, parts, opts...)
+}
+
+func (m *Manager) AbortMultipartUpload(ctx context.Context, path string, uploadID string) error {
+	disk, err := m.DefaultDisk()
+	if err != nil {
+		return err
+	}
+	return disk.AbortMultipartUpload(ctx, path, uploadID)
+}
+
 func (m *Manager) Get(ctx context.Context, path string) ([]byte, error) {
 	disk, err := m.DefaultDisk()
 	if err != nil {

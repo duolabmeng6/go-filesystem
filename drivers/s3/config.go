@@ -32,6 +32,11 @@ type Config struct {
 
 type Client interface {
 	PutObject(ctx context.Context, input *awss3.PutObjectInput, optFns ...func(*awss3.Options)) (*awss3.PutObjectOutput, error)
+	CreateMultipartUpload(ctx context.Context, input *awss3.CreateMultipartUploadInput, optFns ...func(*awss3.Options)) (*awss3.CreateMultipartUploadOutput, error)
+	UploadPart(ctx context.Context, input *awss3.UploadPartInput, optFns ...func(*awss3.Options)) (*awss3.UploadPartOutput, error)
+	ListParts(ctx context.Context, input *awss3.ListPartsInput, optFns ...func(*awss3.Options)) (*awss3.ListPartsOutput, error)
+	CompleteMultipartUpload(ctx context.Context, input *awss3.CompleteMultipartUploadInput, optFns ...func(*awss3.Options)) (*awss3.CompleteMultipartUploadOutput, error)
+	AbortMultipartUpload(ctx context.Context, input *awss3.AbortMultipartUploadInput, optFns ...func(*awss3.Options)) (*awss3.AbortMultipartUploadOutput, error)
 	GetObject(ctx context.Context, input *awss3.GetObjectInput, optFns ...func(*awss3.Options)) (*awss3.GetObjectOutput, error)
 	HeadObject(ctx context.Context, input *awss3.HeadObjectInput, optFns ...func(*awss3.Options)) (*awss3.HeadObjectOutput, error)
 	DeleteObject(ctx context.Context, input *awss3.DeleteObjectInput, optFns ...func(*awss3.Options)) (*awss3.DeleteObjectOutput, error)
@@ -93,7 +98,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		urlEnabled:   config.BaseURL != "",
 		visibility:   config.Visibility,
 		disableACL:   config.DisableACL,
-		capabilities: filesystem.NewCapabilitySet(filesystem.CapabilityCopy, filesystem.CapabilityTemporaryURL, filesystem.CapabilityVisibility, filesystem.CapabilityURL),
+		capabilities: filesystem.NewCapabilitySet(filesystem.CapabilityCopy, filesystem.CapabilityTemporaryURL, filesystem.CapabilityVisibility, filesystem.CapabilityURL, filesystem.CapabilityMultipart),
 	}
 	if config.BaseURL == "" {
 		delete(adapter.capabilities, filesystem.CapabilityURL)

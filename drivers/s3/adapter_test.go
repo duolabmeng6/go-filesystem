@@ -19,7 +19,8 @@ import (
 )
 
 type mockClient struct {
-	objects map[string]mockObject
+	objects   map[string]mockObject
+	multipart map[string]mockMultipartUpload
 }
 
 type mockObject struct {
@@ -29,10 +30,25 @@ type mockObject struct {
 	acl          types.ObjectCannedACL
 }
 
+type mockMultipartUpload struct {
+	key   string
+	acl   types.ObjectCannedACL
+	parts map[int32]mockMultipartPart
+}
+
+type mockMultipartPart struct {
+	data []byte
+	etag string
+	size int64
+}
+
 type mockPresigner struct{}
 
 func newMockClient() *mockClient {
-	return &mockClient{objects: map[string]mockObject{}}
+	return &mockClient{
+		objects:   map[string]mockObject{},
+		multipart: map[string]mockMultipartUpload{},
+	}
 }
 
 func newTestDisk(t testing.TB) *filesystem.Disk {
@@ -71,6 +87,7 @@ func TestContracts(t *testing.T) {
 		return disk
 	})
 	filesystemtest.RunTemporaryURLContract(t, newTestDisk)
+	filesystemtest.RunMultipartContract(t, newTestDisk)
 }
 
 func TestTemporaryURL(t *testing.T) {
@@ -178,6 +195,122 @@ func (m *mockClient) PutObject(ctx context.Context, input *awss3.PutObjectInput,
 	}
 	m.objects[key] = mockObject{data: data, contentType: http.DetectContentType(data), lastModified: time.Now().UTC(), acl: acl}
 	return &awss3.PutObjectOutput{}, nil
+}
+
+func (m *mockClient) CreateMultipartUpload(ctx context.Context, input *awss3.CreateMultipartUploadInput, optFns ...func(*awss3.Options)) (*awss3.CreateMultipartUploadOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	acl := input.ACL
+	if acl == "" {
+		acl = types.ObjectCannedACLPrivate
+	}
+	uploadID := "upload-" + string(rune('a'+len(m.multipart)))
+	m.multipart[uploadID] = mockMultipartUpload{
+		key:   awsString(input.Key),
+		acl:   acl,
+		parts: map[int32]mockMultipartPart{},
+	}
+	return &awss3.CreateMultipartUploadOutput{UploadId: stringPtr(uploadID)}, nil
+}
+
+func (m *mockClient) UploadPart(ctx context.Context, input *awss3.UploadPartInput, optFns ...func(*awss3.Options)) (*awss3.UploadPartOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	uploadID := awsString(input.UploadId)
+	upload, ok := m.multipart[uploadID]
+	if !ok || upload.key != awsString(input.Key) {
+		return nil, apiError("NoSuchUpload")
+	}
+	data, err := io.ReadAll(input.Body)
+	if err != nil {
+		return nil, err
+	}
+	partNumber := int32(0)
+	if input.PartNumber != nil {
+		partNumber = *input.PartNumber
+	}
+	etag := "etag-" + string(rune('a'+partNumber))
+	upload.parts[partNumber] = mockMultipartPart{data: data, etag: etag, size: int64(len(data))}
+	m.multipart[uploadID] = upload
+	return &awss3.UploadPartOutput{ETag: stringPtr(etag)}, nil
+}
+
+func (m *mockClient) ListParts(ctx context.Context, input *awss3.ListPartsInput, optFns ...func(*awss3.Options)) (*awss3.ListPartsOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	upload, ok := m.multipart[awsString(input.UploadId)]
+	if !ok || upload.key != awsString(input.Key) {
+		return nil, apiError("NoSuchUpload")
+	}
+	numbers := make([]int, 0, len(upload.parts))
+	for number := range upload.parts {
+		numbers = append(numbers, int(number))
+	}
+	sort.Ints(numbers)
+	output := &awss3.ListPartsOutput{IsTruncated: boolPtr(false)}
+	for _, number := range numbers {
+		part := upload.parts[int32(number)]
+		partNumber := int32(number)
+		size := part.size
+		output.Parts = append(output.Parts, types.Part{
+			PartNumber: &partNumber,
+			ETag:       stringPtr(part.etag),
+			Size:       &size,
+		})
+	}
+	return output, nil
+}
+
+func (m *mockClient) CompleteMultipartUpload(ctx context.Context, input *awss3.CompleteMultipartUploadInput, optFns ...func(*awss3.Options)) (*awss3.CompleteMultipartUploadOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := awsString(input.Key)
+	uploadID := awsString(input.UploadId)
+	upload, ok := m.multipart[uploadID]
+	if !ok || upload.key != key {
+		return nil, apiError("NoSuchUpload")
+	}
+	if input.IfNoneMatch != nil && *input.IfNoneMatch == "*" {
+		if _, ok := m.objects[key]; ok {
+			return nil, apiError("PreconditionFailed")
+		}
+	}
+	var data []byte
+	if input.MultipartUpload != nil {
+		for _, completed := range input.MultipartUpload.Parts {
+			if completed.PartNumber == nil {
+				return nil, apiError("NoSuchUpload")
+			}
+			part, ok := upload.parts[*completed.PartNumber]
+			if !ok {
+				return nil, apiError("NoSuchUpload")
+			}
+			data = append(data, part.data...)
+		}
+	}
+	acl := upload.acl
+	if acl == "" {
+		acl = types.ObjectCannedACLPrivate
+	}
+	m.objects[key] = mockObject{data: data, contentType: http.DetectContentType(data), lastModified: time.Now().UTC(), acl: acl}
+	delete(m.multipart, uploadID)
+	return &awss3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *mockClient) AbortMultipartUpload(ctx context.Context, input *awss3.AbortMultipartUploadInput, optFns ...func(*awss3.Options)) (*awss3.AbortMultipartUploadOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	upload, ok := m.multipart[awsString(input.UploadId)]
+	if !ok || upload.key != awsString(input.Key) {
+		return nil, apiError("NoSuchUpload")
+	}
+	delete(m.multipart, awsString(input.UploadId))
+	return &awss3.AbortMultipartUploadOutput{}, nil
 }
 
 func (m *mockClient) GetObject(ctx context.Context, input *awss3.GetObjectInput, optFns ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
@@ -349,6 +482,8 @@ func apiError(code string) error {
 }
 
 func int64Ptr(value int64) *int64 { return &value }
+
+func boolPtr(value bool) *bool { return &value }
 
 func urlPathUnescape(value string) (string, error) {
 	return strings.ReplaceAll(value, "%20", " "), nil

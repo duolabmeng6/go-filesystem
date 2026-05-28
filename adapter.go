@@ -15,6 +15,7 @@ const (
 	CapabilityURL          Capability = "url"
 	CapabilityTemporaryURL Capability = "temporary_url"
 	CapabilityVisibility   Capability = "visibility"
+	CapabilityMultipart    Capability = "multipart_upload"
 )
 
 type CapabilitySet map[Capability]struct{}
@@ -61,6 +62,10 @@ type Adapter interface {
 	Capabilities() CapabilitySet
 }
 
+type BulkDeleter interface {
+	DeleteMany(ctx context.Context, paths []string, opts DeleteOptions) error
+}
+
 type Copier interface {
 	Copy(ctx context.Context, src string, dst string) error
 }
@@ -97,4 +102,12 @@ type TemporaryURLGenerator interface {
 type VisibilityController interface {
 	GetVisibility(ctx context.Context, path string) (Visibility, error)
 	SetVisibility(ctx context.Context, path string, visibility Visibility) error
+}
+
+type MultipartUploader interface {
+	CreateMultipartUpload(ctx context.Context, path string, opts WriteOptions) (MultipartUpload, error)
+	UploadPart(ctx context.Context, path string, uploadID string, partNumber int, r io.Reader, size int64) (MultipartUploadPart, error)
+	ListMultipartUploadParts(ctx context.Context, path string, uploadID string) ([]MultipartUploadPart, error)
+	CompleteMultipartUpload(ctx context.Context, path string, uploadID string, parts []MultipartUploadPart, opts WriteOptions) error
+	AbortMultipartUpload(ctx context.Context, path string, uploadID string) error
 }

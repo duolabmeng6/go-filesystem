@@ -239,6 +239,91 @@ func RunTemporaryURLContract(t *testing.T, newDisk func(t testing.TB) *filesyste
 	})
 }
 
+func RunMultipartContract(t *testing.T, newDisk func(t testing.TB) *filesystem.Disk) {
+	t.Helper()
+	t.Run("multipart upload complete", func(t *testing.T) {
+		disk := newDisk(t)
+		ctx := context.Background()
+		if !disk.Adapter().Capabilities().Has(filesystem.CapabilityMultipart) {
+			t.Fatalf("multipart capability is missing")
+		}
+		upload, err := disk.CreateMultipartUpload(ctx, "chunks/result.txt", filesystem.WithOverwrite(false))
+		if err != nil {
+			t.Fatalf("create multipart upload: %v", err)
+		}
+		part1, err := disk.UploadPart(ctx, upload.Path, upload.UploadID, 1, strings.NewReader("hello "), int64(len("hello ")))
+		if err != nil {
+			t.Fatalf("upload part 1: %v", err)
+		}
+		part2, err := disk.UploadPart(ctx, upload.Path, upload.UploadID, 2, strings.NewReader("world"), int64(len("world")))
+		if err != nil {
+			t.Fatalf("upload part 2: %v", err)
+		}
+		listed, err := disk.ListMultipartUploadParts(ctx, upload.Path, upload.UploadID)
+		if err != nil {
+			t.Fatalf("list parts: %v", err)
+		}
+		if len(listed) != 2 || listed[0].PartNumber != part1.PartNumber || listed[1].PartNumber != part2.PartNumber {
+			t.Fatalf("parts=%+v", listed)
+		}
+		if err := disk.CompleteMultipartUpload(ctx, upload.Path, upload.UploadID, listed, filesystem.WithOverwrite(false)); err != nil {
+			t.Fatalf("complete multipart upload: %v", err)
+		}
+		got, err := disk.Get(ctx, "chunks/result.txt")
+		if err != nil {
+			t.Fatalf("get completed object: %v", err)
+		}
+		if string(got) != "hello world" {
+			t.Fatalf("content=%q", got)
+		}
+	})
+
+	t.Run("multipart upload abort", func(t *testing.T) {
+		disk := newDisk(t)
+		ctx := context.Background()
+		upload, err := disk.CreateMultipartUpload(ctx, "chunks/abort.txt")
+		if err != nil {
+			t.Fatalf("create multipart upload: %v", err)
+		}
+		if _, err := disk.UploadPart(ctx, upload.Path, upload.UploadID, 1, strings.NewReader("part"), int64(len("part"))); err != nil {
+			t.Fatalf("upload part: %v", err)
+		}
+		if err := disk.AbortMultipartUpload(ctx, upload.Path, upload.UploadID); err != nil {
+			t.Fatalf("abort multipart upload: %v", err)
+		}
+		if _, err := disk.ListMultipartUploadParts(ctx, upload.Path, upload.UploadID); !errors.Is(err, filesystem.ErrNotFound) {
+			t.Fatalf("expected not found after abort, got %v", err)
+		}
+	})
+
+	t.Run("multipart complete respects overwrite false", func(t *testing.T) {
+		disk := newDisk(t)
+		ctx := context.Background()
+		if err := disk.Put(ctx, "chunks/conflict.txt", []byte("old")); err != nil {
+			t.Fatalf("put existing: %v", err)
+		}
+		upload, err := disk.CreateMultipartUpload(ctx, "chunks/conflict.txt")
+		if err != nil {
+			t.Fatalf("create multipart upload: %v", err)
+		}
+		part, err := disk.UploadPart(ctx, upload.Path, upload.UploadID, 1, strings.NewReader("new"), int64(len("new")))
+		if err != nil {
+			t.Fatalf("upload part: %v", err)
+		}
+		err = disk.CompleteMultipartUpload(ctx, upload.Path, upload.UploadID, []filesystem.MultipartUploadPart{part}, filesystem.WithOverwrite(false))
+		if !errors.Is(err, filesystem.ErrAlreadyExists) {
+			t.Fatalf("expected already exists, got %v", err)
+		}
+		got, err := disk.Get(ctx, "chunks/conflict.txt")
+		if err != nil {
+			t.Fatalf("get existing: %v", err)
+		}
+		if !bytes.Equal(got, []byte("old")) {
+			t.Fatalf("existing object changed to %q", got)
+		}
+	})
+}
+
 func RunReadOnlyContract(t *testing.T, newDisk func(t testing.TB) *filesystem.Disk) {
 	t.Helper()
 	t.Run("write operations return read only", func(t *testing.T) {
