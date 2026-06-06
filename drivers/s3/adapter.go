@@ -70,7 +70,9 @@ func (a *Adapter) Write(ctx context.Context, path string, r io.Reader, opts file
 		ContentLength: &contentLength,
 	}
 	if !a.disableACL {
-		input.ACL = objectACL(visibility)
+		if acl := objectACL(visibility); acl != "" {
+			input.ACL = acl
+		}
 	}
 	_, err = a.client.PutObject(ctx, input)
 	return mapError(err)
@@ -234,11 +236,17 @@ func (a *Adapter) Copy(ctx context.Context, src string, dst string) error {
 		return err
 	}
 	copySource := a.bucket + "/" + escapePath(src)
-	_, err := a.client.CopyObject(ctx, &awss3.CopyObjectInput{
+	input := &awss3.CopyObjectInput{
 		Bucket:     &a.bucket,
 		Key:        &dst,
 		CopySource: &copySource,
-	})
+	}
+	if !a.disableACL {
+		if acl := objectACL(a.visibility); acl != "" {
+			input.ACL = acl
+		}
+	}
+	_, err := a.client.CopyObject(ctx, input)
 	return mapError(err)
 }
 

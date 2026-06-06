@@ -45,7 +45,9 @@ func (a *Adapter) CreateMultipartUpload(ctx context.Context, path string, opts f
 		Key:    &path,
 	}
 	if !a.disableACL {
-		input.ACL = objectACL(visibility)
+		if acl := objectACL(visibility); acl != "" {
+			input.ACL = acl
+		}
 	}
 	output, err := a.client.CreateMultipartUpload(ctx, input)
 	if err != nil {

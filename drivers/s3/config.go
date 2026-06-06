@@ -158,7 +158,7 @@ func (c Config) withDefaults() (Config, error) {
 		c.Region = "us-east-1"
 	}
 	if c.Visibility == "" {
-		c.Visibility = filesystem.VisibilityPrivate
+		c.Visibility = filesystem.VisibilityDefault
 	}
 	if !c.Visibility.Valid() {
 		return c, filesystem.ErrInvalidVisibility
@@ -183,6 +183,9 @@ func applyS3CompatibilityOptions(options *awss3.Options) {
 func objectACL(visibility filesystem.Visibility) types.ObjectCannedACL {
 	if visibility == filesystem.VisibilityPublic {
 		return types.ObjectCannedACLPublicRead
+	}
+	if visibility == filesystem.VisibilityDefault {
+		return ""
 	}
 	return types.ObjectCannedACLPrivate
 }

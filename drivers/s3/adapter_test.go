@@ -23,6 +23,8 @@ type mockClient struct {
 	objects      map[string]mockObject
 	multipart    map[string]mockMultipartUpload
 	lastPut      *awss3.PutObjectInput
+	lastCopy     *awss3.CopyObjectInput
+	lastCreate   *awss3.CreateMultipartUploadInput
 	lastComplete *awss3.CompleteMultipartUploadInput
 }
 
@@ -243,6 +245,102 @@ func TestWriteSpoolsReaderToProvideContentLength(t *testing.T) {
 	}
 }
 
+func TestDefaultVisibilityOmitsS3ObjectACL(t *testing.T) {
+	client := newMockClient()
+	adapter, err := New(context.Background(), Config{
+		Bucket:        "bucket",
+		Region:        "us-east-1",
+		Client:        client,
+		PresignClient: mockPresigner{},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	if err := adapter.Write(context.Background(), "inherited.txt", strings.NewReader("x"), filesystem.WriteOptions{Overwrite: true}); err != nil {
+		t.Fatalf("write default visibility: %v", err)
+	}
+	if client.lastPut == nil {
+		t.Fatalf("expected put object call")
+	}
+	if client.lastPut.ACL != "" {
+		t.Fatalf("expected default visibility to omit PutObject ACL, got %q", client.lastPut.ACL)
+	}
+
+	if err := adapter.Copy(context.Background(), "inherited.txt", "copy.txt"); err != nil {
+		t.Fatalf("copy default visibility: %v", err)
+	}
+	if client.lastCopy == nil {
+		t.Fatalf("expected copy object call")
+	}
+	if client.lastCopy.ACL != "" {
+		t.Fatalf("expected default visibility to omit CopyObject ACL, got %q", client.lastCopy.ACL)
+	}
+
+	upload, err := adapter.CreateMultipartUpload(context.Background(), "multipart.txt", filesystem.WriteOptions{})
+	if err != nil {
+		t.Fatalf("create multipart default visibility: %v", err)
+	}
+	if client.lastCreate == nil {
+		t.Fatalf("expected create multipart call")
+	}
+	if client.lastCreate.ACL != "" {
+		t.Fatalf("expected default visibility to omit multipart ACL, got %q", client.lastCreate.ACL)
+	}
+	part, err := adapter.UploadPart(context.Background(), "multipart.txt", upload.UploadID, 1, strings.NewReader("zip"), 3)
+	if err != nil {
+		t.Fatalf("upload part: %v", err)
+	}
+	if err := adapter.CompleteMultipartUpload(context.Background(), "multipart.txt", upload.UploadID, []filesystem.MultipartUploadPart{part}, filesystem.WriteOptions{}); err != nil {
+		t.Fatalf("complete multipart: %v", err)
+	}
+}
+
+func TestExplicitVisibilitySetsS3ObjectACL(t *testing.T) {
+	client := newMockClient()
+	adapter, err := New(context.Background(), Config{
+		Bucket:        "bucket",
+		Region:        "us-east-1",
+		Visibility:    filesystem.VisibilityDefault,
+		Client:        client,
+		PresignClient: mockPresigner{},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	if err := adapter.Write(context.Background(), "public.txt", strings.NewReader("x"), filesystem.WriteOptions{Overwrite: true, Visibility: filesystem.VisibilityPublic}); err != nil {
+		t.Fatalf("write public visibility: %v", err)
+	}
+	if client.lastPut == nil || client.lastPut.ACL != types.ObjectCannedACLPublicRead {
+		t.Fatalf("expected public PutObject ACL, got %#v", client.lastPut)
+	}
+
+	if err := adapter.Write(context.Background(), "private.txt", strings.NewReader("x"), filesystem.WriteOptions{Overwrite: true, Visibility: filesystem.VisibilityPrivate}); err != nil {
+		t.Fatalf("write private visibility: %v", err)
+	}
+	if client.lastPut == nil || client.lastPut.ACL != types.ObjectCannedACLPrivate {
+		t.Fatalf("expected private PutObject ACL, got %#v", client.lastPut)
+	}
+
+	privateAdapter, err := New(context.Background(), Config{
+		Bucket:        "bucket",
+		Region:        "us-east-1",
+		Visibility:    filesystem.VisibilityPrivate,
+		Client:        client,
+		PresignClient: mockPresigner{},
+	})
+	if err != nil {
+		t.Fatalf("new private adapter: %v", err)
+	}
+	if err := privateAdapter.Copy(context.Background(), "public.txt", "private-copy.txt"); err != nil {
+		t.Fatalf("copy private visibility: %v", err)
+	}
+	if client.lastCopy == nil || client.lastCopy.ACL != types.ObjectCannedACLPrivate {
+		t.Fatalf("expected private CopyObject ACL, got %#v", client.lastCopy)
+	}
+}
+
 func TestMultipartCompleteDoesNotSendConditionalHeader(t *testing.T) {
 	client := newMockClient()
 	adapter, err := New(context.Background(), Config{
@@ -301,6 +399,7 @@ func (m *mockClient) CreateMultipartUpload(ctx context.Context, input *awss3.Cre
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	m.lastCreate = input
 	acl := input.ACL
 	if acl == "" {
 		acl = types.ObjectCannedACLPrivate
@@ -457,12 +556,16 @@ func (m *mockClient) CopyObject(ctx context.Context, input *awss3.CopyObjectInpu
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	m.lastCopy = input
 	source := awsString(input.CopySource)
 	source = strings.TrimPrefix(source, awsString(input.Bucket)+"/")
 	source, _ = urlPathUnescape(source)
 	object, ok := m.objects[source]
 	if !ok {
 		return nil, apiError("NoSuchKey")
+	}
+	if input.ACL != "" {
+		object.acl = input.ACL
 	}
 	m.objects[awsString(input.Key)] = object
 	return &awss3.CopyObjectOutput{}, nil
