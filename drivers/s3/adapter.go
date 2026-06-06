@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -48,19 +49,67 @@ func (a *Adapter) Write(ctx context.Context, path string, r io.Reader, opts file
 	if a.disableACL && opts.Visibility != "" {
 		return filesystem.ErrUnsupported
 	}
+	if !opts.Overwrite {
+		exists, err := a.Exists(ctx, path)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return filesystem.ErrAlreadyExists
+		}
+	}
+	body, contentLength, cleanup, err := preparePutObjectBody(r)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	input := &awss3.PutObjectInput{
-		Bucket: &a.bucket,
-		Key:    &path,
-		Body:   r,
+		Bucket:        &a.bucket,
+		Key:           &path,
+		Body:          body,
+		ContentLength: &contentLength,
 	}
 	if !a.disableACL {
 		input.ACL = objectACL(visibility)
 	}
-	if !opts.Overwrite {
-		input.IfNoneMatch = stringPtr("*")
-	}
-	_, err := a.client.PutObject(ctx, input)
+	_, err = a.client.PutObject(ctx, input)
 	return mapError(err)
+}
+
+func preparePutObjectBody(r io.Reader) (io.Reader, int64, func(), error) {
+	if seeker, ok := r.(io.ReadSeeker); ok {
+		current, err := seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, 0, func() {}, err
+		}
+		end, err := seeker.Seek(0, io.SeekEnd)
+		if err != nil {
+			return nil, 0, func() {}, err
+		}
+		if _, err := seeker.Seek(current, io.SeekStart); err != nil {
+			return nil, 0, func() {}, err
+		}
+		return seeker, end - current, func() {}, nil
+	}
+	tmp, err := os.CreateTemp("", "go-filesystem-s3-put-*")
+	if err != nil {
+		return nil, 0, func() {}, err
+	}
+	cleanup := func() {
+		name := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(name)
+	}
+	size, err := io.Copy(tmp, r)
+	if err != nil {
+		cleanup()
+		return nil, 0, func() {}, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, 0, func() {}, err
+	}
+	return tmp, size, cleanup, nil
 }
 
 func (a *Adapter) Open(ctx context.Context, path string) (io.ReadCloser, error) {

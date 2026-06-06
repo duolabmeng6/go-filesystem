@@ -31,6 +31,15 @@ func (a *Adapter) CreateMultipartUpload(ctx context.Context, path string, opts f
 	if a.disableACL && opts.Visibility != "" {
 		return filesystem.MultipartUpload{}, filesystem.ErrUnsupported
 	}
+	if !opts.Overwrite {
+		exists, err := a.Exists(ctx, path)
+		if err != nil {
+			return filesystem.MultipartUpload{}, err
+		}
+		if exists {
+			return filesystem.MultipartUpload{}, filesystem.ErrAlreadyExists
+		}
+	}
 	input := &awss3.CreateMultipartUploadInput{
 		Bucket: &a.bucket,
 		Key:    &path,
@@ -136,6 +145,15 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 	if len(parts) == 0 {
 		return fmt.Errorf("%w: no uploaded parts", filesystem.ErrInvalidPath)
 	}
+	if !opts.Overwrite {
+		exists, err := a.Exists(ctx, path)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return filesystem.ErrAlreadyExists
+		}
+	}
 	sort.Slice(parts, func(i, j int) bool {
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
@@ -154,9 +172,6 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 		MultipartUpload: &types.CompletedMultipartUpload{
 			Parts: completed,
 		},
-	}
-	if !opts.Overwrite {
-		input.IfNoneMatch = stringPtr("*")
 	}
 	_, err := a.client.CompleteMultipartUpload(ctx, input)
 	return mapError(err)

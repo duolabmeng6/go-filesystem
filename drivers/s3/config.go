@@ -77,6 +77,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		}
 		client = awss3.NewFromConfig(awsConfig, func(o *awss3.Options) {
 			o.UsePathStyle = config.UsePathStyle
+			applyS3CompatibilityOptions(o)
 			if config.Endpoint != "" {
 				endpoint := withScheme(config.Endpoint, config.DisableSSL)
 				o.BaseEndpoint = aws.String(endpoint)
@@ -172,6 +173,11 @@ type unsupportedPresignClient struct{}
 
 func (unsupportedPresignClient) PresignGetObject(context.Context, *awss3.GetObjectInput, ...func(*awss3.PresignOptions)) (*v4.PresignedHTTPRequest, error) {
 	return nil, filesystem.ErrUnsupported
+}
+
+func applyS3CompatibilityOptions(options *awss3.Options) {
+	options.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+	options.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 }
 
 func objectACL(visibility filesystem.Visibility) types.ObjectCannedACL {

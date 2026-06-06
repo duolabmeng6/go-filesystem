@@ -189,6 +189,11 @@ func isEmptyRepositoryError(err error) bool {
 		strings.Contains(message, "couldn't find remote ref")
 }
 
+const (
+	remoteVersionConflictMarker = "（远端版本-"
+	legacyConflictMarker        = "（冲突文件-"
+)
+
 func ConflictFileName(filePath string, at time.Time) string {
 	filePath = strings.TrimSpace(filePath)
 	dir := path.Dir(filePath)
@@ -202,11 +207,16 @@ func ConflictFileName(filePath string, at time.Time) string {
 		stem = name
 		ext = ""
 	}
-	conflictName := stem + "（冲突文件-" + at.Format("20060102-1504") + "）" + ext
+	conflictName := stem + remoteVersionConflictMarker + at.Format("20060102-1504") + "）" + ext
 	if dir == "" {
 		return conflictName
 	}
 	return path.Join(dir, conflictName)
+}
+
+func isConflictCopyName(name string) bool {
+	name = path.Base(strings.TrimSpace(name))
+	return strings.Contains(name, remoteVersionConflictMarker) || strings.Contains(name, legacyConflictMarker)
 }
 
 func IsReadOnlyMode(mode string) bool {

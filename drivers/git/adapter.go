@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,6 +23,7 @@ import (
 )
 
 type Adapter struct {
+	gitMu        sync.Mutex
 	mu           sync.Mutex
 	config       Config
 	repo         *gogit.Repository
@@ -37,11 +37,22 @@ type Status struct {
 	Changed []string `json:"changed"`
 }
 
+type commitMessageChanges struct {
+	Added    []string
+	Modified []string
+	Deleted  []string
+	Renamed  []string
+}
+
+const defaultCommitMessage = "同步文件变更"
+
 type dirtySnapshot struct {
-	Path      string
-	Exists    bool
-	Content   []byte
-	Untracked bool
+	Path        string
+	Exists      bool
+	Content     []byte
+	BaseExists  bool
+	BaseContent []byte
+	Untracked   bool
 }
 
 func New(ctx context.Context, config Config) (*Adapter, error) {
@@ -84,13 +95,34 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 }
 
 func (a *Adapter) Write(ctx context.Context, path string, r io.Reader, opts filesystem.WriteOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r == nil {
+		return fmt.Errorf("%w: nil reader", filesystem.ErrInvalidPath)
+	}
+	if err := a.ensureWritablePathForWrite(ctx, path); err != nil {
+		return err
+	}
+	spooled, cleanup, err := spoolGitWriteReader(ctx, r)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := a.ensureWritablePath(ctx, path, false); err != nil {
 		return err
 	}
-	return a.files.Write(ctx, path, r, opts)
+	return a.files.Write(ctx, path, spooled, opts)
 }
 
 func (a *Adapter) Open(ctx context.Context, path string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := rejectGitInternalPath(path); err != nil {
 		return nil, err
 	}
@@ -98,6 +130,11 @@ func (a *Adapter) Open(ctx context.Context, path string) (io.ReadCloser, error) 
 }
 
 func (a *Adapter) Delete(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := a.ensureWritablePath(ctx, path, false); err != nil {
 		return err
 	}
@@ -105,6 +142,11 @@ func (a *Adapter) Delete(ctx context.Context, path string) error {
 }
 
 func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := rejectGitInternalPath(path); err != nil {
 		return false, err
 	}
@@ -112,6 +154,11 @@ func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
 }
 
 func (a *Adapter) Stat(ctx context.Context, path string) (filesystem.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return filesystem.FileInfo{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := rejectGitInternalPath(path); err != nil {
 		return filesystem.FileInfo{}, err
 	}
@@ -119,6 +166,11 @@ func (a *Adapter) Stat(ctx context.Context, path string) (filesystem.FileInfo, e
 }
 
 func (a *Adapter) ListPage(ctx context.Context, prefix string, opts filesystem.ListOptions) (filesystem.Page, error) {
+	if err := ctx.Err(); err != nil {
+		return filesystem.Page{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := rejectGitInternalPath(prefix); err != nil && prefix != "" {
 		return filesystem.Page{}, err
 	}
@@ -283,6 +335,11 @@ func (a *Adapter) Capabilities() filesystem.CapabilitySet {
 }
 
 func (a *Adapter) Copy(ctx context.Context, src string, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := rejectGitInternalPath(src); err != nil {
 		return err
 	}
@@ -293,6 +350,11 @@ func (a *Adapter) Copy(ctx context.Context, src string, dst string) error {
 }
 
 func (a *Adapter) Move(ctx context.Context, src string, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := rejectGitInternalPath(src); err != nil {
 		return err
 	}
@@ -303,6 +365,11 @@ func (a *Adapter) Move(ctx context.Context, src string, dst string) error {
 }
 
 func (a *Adapter) MakeDirectory(ctx context.Context, dir string, opts filesystem.DirectoryOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := a.ensureWritablePath(ctx, dir, true); err != nil {
 		return err
 	}
@@ -310,6 +377,11 @@ func (a *Adapter) MakeDirectory(ctx context.Context, dir string, opts filesystem
 }
 
 func (a *Adapter) DeleteDirectory(ctx context.Context, dir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := a.ensureWritablePath(ctx, dir, true); err != nil {
 		return err
 	}
@@ -324,6 +396,8 @@ func (a *Adapter) Pull(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	a.gitMu.Lock()
+	defer a.gitMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.pullLocked(ctx)
@@ -342,10 +416,10 @@ func (a *Adapter) pullLocked(ctx context.Context) error {
 		Auth:          auth,
 	})
 	if err == nil || errors.Is(err, gogit.NoErrAlreadyUpToDate) {
-		return nil
+		return a.pruneEmptyDirectoriesLocked()
 	}
 	if isEmptyRepositoryError(err) {
-		return nil
+		return a.pruneEmptyDirectoriesLocked()
 	}
 	return mapGitError(err)
 }
@@ -358,15 +432,22 @@ func (a *Adapter) Commit(ctx context.Context, message string) (string, error) {
 		return "", filesystem.ErrReadOnly
 	}
 	message = strings.TrimSpace(message)
-	if message == "" {
-		message = "同步文件变更"
-	}
+	a.gitMu.Lock()
+	defer a.gitMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.commitLocked(message)
 }
 
 func (a *Adapter) commitLocked(message string) (string, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		generated, err := a.defaultCommitMessageLocked()
+		if err != nil {
+			return "", err
+		}
+		message = generated
+	}
 	if err := a.worktree.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
 		return "", mapGitError(err)
 	}
@@ -394,8 +475,8 @@ func (a *Adapter) Push(ctx context.Context) error {
 	if a.config.ReadOnly {
 		return filesystem.ErrReadOnly
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.gitMu.Lock()
+	defer a.gitMu.Unlock()
 	return a.pushLocked(ctx)
 }
 
@@ -432,32 +513,40 @@ func (a *Adapter) Sync(ctx context.Context, message string) error {
 		return filesystem.ErrReadOnly
 	}
 	message = strings.TrimSpace(message)
-	if message == "" {
-		message = "同步文件变更"
-	}
+	a.gitMu.Lock()
+	defer a.gitMu.Unlock()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	snapshots, err := a.snapshotDirtyLocked()
 	if err != nil {
+		a.mu.Unlock()
 		return err
 	}
 	if len(snapshots) > 0 {
 		if err := a.cleanWorktreeLocked(snapshots); err != nil {
+			a.mu.Unlock()
 			return err
 		}
 	}
 	if err := a.pullLocked(ctx); err != nil {
+		a.mu.Unlock()
 		return err
 	}
 	if len(snapshots) > 0 {
 		if err := a.restoreSnapshotsLocked(snapshots, time.Now()); err != nil {
+			a.mu.Unlock()
 			return err
 		}
 	}
-	if _, err := a.commitLocked(message); err != nil {
+	if err := a.pruneEmptyDirectoriesLocked(); err != nil {
+		a.mu.Unlock()
 		return err
 	}
+	if _, err := a.commitLocked(message); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	a.mu.Unlock()
 	return a.pushLocked(ctx)
 }
 
@@ -485,10 +574,103 @@ func (a *Adapter) Status(ctx context.Context) (Status, error) {
 	return Status{Dirty: len(changed) > 0, Changed: changed}, nil
 }
 
+func (a *Adapter) defaultCommitMessageLocked() (string, error) {
+	status, err := a.worktree.StatusWithOptions(gogit.StatusOptions{Strategy: gogit.Preload})
+	if err != nil {
+		return "", mapGitError(err)
+	}
+	changes := commitMessageChanges{}
+	for filePath, file := range status {
+		if file.Worktree == gogit.Unmodified && file.Staging == gogit.Unmodified {
+			continue
+		}
+		if isGitInternalPath(filePath) {
+			continue
+		}
+		switch classifyCommitMessageChange(file) {
+		case "added":
+			changes.Added = append(changes.Added, filePath)
+		case "deleted":
+			changes.Deleted = append(changes.Deleted, filePath)
+		case "renamed":
+			changes.Renamed = append(changes.Renamed, renameCommitMessagePath(filePath, file.Extra))
+		default:
+			changes.Modified = append(changes.Modified, filePath)
+		}
+	}
+	return formatCommitMessage(changes), nil
+}
+
+func classifyCommitMessageChange(file *gogit.FileStatus) string {
+	if file == nil {
+		return "modified"
+	}
+	if file.Worktree == gogit.Renamed || file.Staging == gogit.Renamed {
+		return "renamed"
+	}
+	if file.Worktree == gogit.Untracked || file.Staging == gogit.Untracked || file.Staging == gogit.Added || file.Worktree == gogit.Added || file.Staging == gogit.Copied || file.Worktree == gogit.Copied {
+		return "added"
+	}
+	if file.Worktree == gogit.Deleted || file.Staging == gogit.Deleted {
+		return "deleted"
+	}
+	return "modified"
+}
+
+func renameCommitMessagePath(filePath string, previous string) string {
+	previous = strings.TrimSpace(previous)
+	if previous == "" {
+		return filePath
+	}
+	return previous + " -> " + filePath
+}
+
+func formatCommitMessage(changes commitMessageChanges) string {
+	sort.Strings(changes.Added)
+	sort.Strings(changes.Modified)
+	sort.Strings(changes.Deleted)
+	sort.Strings(changes.Renamed)
+	total := len(changes.Added) + len(changes.Modified) + len(changes.Deleted) + len(changes.Renamed)
+	if total == 0 {
+		return defaultCommitMessage
+	}
+	if total == 1 {
+		if len(changes.Added) == 1 {
+			return "新增 " + changes.Added[0]
+		}
+		if len(changes.Modified) == 1 {
+			return "更新 " + changes.Modified[0]
+		}
+		if len(changes.Deleted) == 1 {
+			return "删除 " + changes.Deleted[0]
+		}
+		return "重命名 " + changes.Renamed[0]
+	}
+	var builder strings.Builder
+	_, _ = fmt.Fprintf(&builder, "同步 %d 个文件变更", total)
+	appendCommitMessageSection(&builder, "新增", changes.Added)
+	appendCommitMessageSection(&builder, "更新", changes.Modified)
+	appendCommitMessageSection(&builder, "删除", changes.Deleted)
+	appendCommitMessageSection(&builder, "重命名", changes.Renamed)
+	return builder.String()
+}
+
+func appendCommitMessageSection(builder *strings.Builder, title string, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(builder, "\n\n%s:", title)
+	for _, filePath := range paths {
+		_, _ = fmt.Fprintf(builder, "\n- %s", filePath)
+	}
+}
+
 func (a *Adapter) Conflicts(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	root := a.files.Root()
 	var conflicts []string
 	err := filepath.WalkDir(root, func(current string, d os.DirEntry, walkErr error) error {
@@ -512,7 +694,7 @@ func (a *Adapter) Conflicts(ctx context.Context) ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if strings.Contains(path.Base(entryPath), "（冲突文件-") {
+		if isConflictCopyName(entryPath) {
 			conflicts = append(conflicts, entryPath)
 		}
 		return ctx.Err()
@@ -540,6 +722,37 @@ func (a *Adapter) ensureWritablePath(ctx context.Context, path string, isDir boo
 		return fmt.Errorf("%w: path is ignored by .gitignore", filesystem.ErrInvalidPath)
 	}
 	return nil
+}
+
+func (a *Adapter) ensureWritablePathForWrite(ctx context.Context, path string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ensureWritablePath(ctx, path, false)
+}
+
+func spoolGitWriteReader(ctx context.Context, r io.Reader) (io.Reader, func(), error) {
+	tmp, err := os.CreateTemp("", "go-filesystem-git-write-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() {
+		name := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(name)
+	}
+	if _, err := io.Copy(tmp, r); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return tmp, cleanup, nil
 }
 
 func (a *Adapter) isIgnored(path string, isDir bool) (bool, error) {
@@ -633,6 +846,12 @@ func (a *Adapter) snapshotDirtyLocked() ([]dirtySnapshot, error) {
 			Path:      path,
 			Untracked: file.Worktree == gogit.Untracked || file.Staging == gogit.Untracked,
 		}
+		baseExists, baseContent, err := a.headFileContentLocked(path)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.BaseExists = baseExists
+		snapshot.BaseContent = baseContent
 		content, err := os.ReadFile(filepath.Join(a.files.Root(), filepath.FromSlash(path)))
 		if err == nil {
 			snapshot.Exists = true
@@ -647,6 +866,32 @@ func (a *Adapter) snapshotDirtyLocked() ([]dirtySnapshot, error) {
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
+}
+
+func (a *Adapter) headFileContentLocked(path string) (bool, []byte, error) {
+	head, err := a.repo.Head()
+	if err != nil {
+		if isReferenceNotFoundError(err) {
+			return false, nil, nil
+		}
+		return false, nil, mapGitError(err)
+	}
+	commit, err := a.repo.CommitObject(head.Hash())
+	if err != nil {
+		return false, nil, mapGitError(err)
+	}
+	file, err := commit.File(path)
+	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			return false, nil, nil
+		}
+		return false, nil, mapGitError(err)
+	}
+	content, err := file.Contents()
+	if err != nil {
+		return false, nil, mapGitError(err)
+	}
+	return true, []byte(content), nil
 }
 
 func (a *Adapter) cleanWorktreeLocked(snapshots []dirtySnapshot) error {
@@ -672,7 +917,11 @@ func (a *Adapter) restoreSnapshotsLocked(snapshots []dirtySnapshot, at time.Time
 	for _, snapshot := range snapshots {
 		target := filepath.Join(a.files.Root(), filepath.FromSlash(snapshot.Path))
 		remoteContent, remoteErr := os.ReadFile(target)
-		if snapshot.Exists && remoteErr == nil && !bytes.Equal(remoteContent, snapshot.Content) {
+		remoteExists := remoteErr == nil
+		if remoteErr != nil && !errors.Is(remoteErr, os.ErrNotExist) {
+			return mapLocalStatError(remoteErr)
+		}
+		if snapshot.Exists && remoteChangedSinceSnapshot(snapshot, remoteExists, remoteContent) {
 			conflictPath := ConflictFileName(snapshot.Path, at)
 			conflictTarget := filepath.Join(a.files.Root(), filepath.FromSlash(conflictPath))
 			if err := os.MkdirAll(filepath.Dir(conflictTarget), 0o755); err != nil {
@@ -683,7 +932,7 @@ func (a *Adapter) restoreSnapshotsLocked(snapshots []dirtySnapshot, at time.Time
 			}
 		}
 		if !snapshot.Exists {
-			if remoteErr == nil {
+			if remoteChangedSinceSnapshot(snapshot, remoteExists, remoteContent) {
 				conflictPath := ConflictFileName(snapshot.Path, at)
 				conflictTarget := filepath.Join(a.files.Root(), filepath.FromSlash(conflictPath))
 				if err := os.MkdirAll(filepath.Dir(conflictTarget), 0o755); err != nil {
@@ -703,6 +952,66 @@ func (a *Adapter) restoreSnapshotsLocked(snapshots []dirtySnapshot, at time.Time
 		}
 		if err := os.WriteFile(target, snapshot.Content, 0o600); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func remoteChangedSinceSnapshot(snapshot dirtySnapshot, remoteExists bool, remoteContent []byte) bool {
+	if snapshot.BaseExists != remoteExists {
+		return true
+	}
+	if !snapshot.BaseExists {
+		return false
+	}
+	return !bytes.Equal(remoteContent, snapshot.BaseContent)
+}
+
+func (a *Adapter) pruneEmptyDirectoriesLocked() error {
+	root := a.files.Root()
+	var dirs []string
+	err := filepath.WalkDir(root, func(current string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return mapLocalStatError(walkErr)
+		}
+		if current == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		entryPath := filepath.ToSlash(rel)
+		if isGitInternalPath(entryPath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, current)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(dirs, func(i, j int) bool {
+		return len(dirs[i]) > len(dirs[j])
+	})
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return mapLocalStatError(err)
+		}
+		if len(entries) > 0 {
+			continue
+		}
+		if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return mapLocalStatError(err)
 		}
 	}
 	return nil

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -19,8 +20,10 @@ import (
 )
 
 type mockClient struct {
-	objects   map[string]mockObject
-	multipart map[string]mockMultipartUpload
+	objects      map[string]mockObject
+	multipart    map[string]mockMultipartUpload
+	lastPut      *awss3.PutObjectInput
+	lastComplete *awss3.CompleteMultipartUploadInput
 }
 
 type mockObject struct {
@@ -175,10 +178,107 @@ func TestDisableACL(t *testing.T) {
 	}
 }
 
+func TestCompatibilityOptionsUseRequiredChecksums(t *testing.T) {
+	options := awss3.Options{}
+	applyS3CompatibilityOptions(&options)
+
+	if options.RequestChecksumCalculation != aws.RequestChecksumCalculationWhenRequired {
+		t.Fatalf("expected request checksum when required, got %#v", options.RequestChecksumCalculation)
+	}
+	if options.ResponseChecksumValidation != aws.ResponseChecksumValidationWhenRequired {
+		t.Fatalf("expected response checksum when required, got %#v", options.ResponseChecksumValidation)
+	}
+}
+
+func TestWriteWithoutOverwriteUsesPreflightInsteadOfConditionalPut(t *testing.T) {
+	client := newMockClient()
+	adapter, err := New(context.Background(), Config{
+		Bucket:        "bucket",
+		Region:        "us-east-1",
+		Client:        client,
+		PresignClient: mockPresigner{},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	if err := adapter.Write(context.Background(), "a.txt", strings.NewReader("alpha"), filesystem.WriteOptions{}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if client.lastPut == nil {
+		t.Fatalf("expected put object call")
+	}
+	if client.lastPut.IfNoneMatch != nil {
+		t.Fatalf("S3-compatible writes should not send IfNoneMatch, got %q", *client.lastPut.IfNoneMatch)
+	}
+	if err := adapter.Write(context.Background(), "a.txt", strings.NewReader("bravo"), filesystem.WriteOptions{}); !errors.Is(err, filesystem.ErrAlreadyExists) {
+		t.Fatalf("expected preflight ErrAlreadyExists, got %v", err)
+	}
+}
+
+func TestWriteSpoolsReaderToProvideContentLength(t *testing.T) {
+	client := newMockClient()
+	adapter, err := New(context.Background(), Config{
+		Bucket:        "bucket",
+		Region:        "us-east-1",
+		Client:        client,
+		PresignClient: mockPresigner{},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	reader := io.LimitReader(strings.NewReader("streamed"), int64(len("streamed")))
+	if err := adapter.Write(context.Background(), "streamed.txt", reader, filesystem.WriteOptions{Overwrite: true}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if client.lastPut == nil || client.lastPut.ContentLength == nil {
+		t.Fatalf("expected put object content length")
+	}
+	if *client.lastPut.ContentLength != int64(len("streamed")) {
+		t.Fatalf("expected content length %d, got %d", len("streamed"), *client.lastPut.ContentLength)
+	}
+	if got := string(client.objects["streamed.txt"].data); got != "streamed" {
+		t.Fatalf("unexpected stored content %q", got)
+	}
+}
+
+func TestMultipartCompleteDoesNotSendConditionalHeader(t *testing.T) {
+	client := newMockClient()
+	adapter, err := New(context.Background(), Config{
+		Bucket:        "bucket",
+		Region:        "us-east-1",
+		Client:        client,
+		PresignClient: mockPresigner{},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	upload, err := adapter.CreateMultipartUpload(context.Background(), "archive.zip", filesystem.WriteOptions{})
+	if err != nil {
+		t.Fatalf("create multipart: %v", err)
+	}
+	part, err := adapter.UploadPart(context.Background(), "archive.zip", upload.UploadID, 1, strings.NewReader("zip"), 3)
+	if err != nil {
+		t.Fatalf("upload part: %v", err)
+	}
+	if err := adapter.CompleteMultipartUpload(context.Background(), "archive.zip", upload.UploadID, []filesystem.MultipartUploadPart{part}, filesystem.WriteOptions{}); err != nil {
+		t.Fatalf("complete multipart: %v", err)
+	}
+	if client.lastComplete == nil {
+		t.Fatalf("expected complete multipart call")
+	}
+	if client.lastComplete.IfNoneMatch != nil {
+		t.Fatalf("S3-compatible multipart complete should not send IfNoneMatch, got %q", *client.lastComplete.IfNoneMatch)
+	}
+}
+
 func (m *mockClient) PutObject(ctx context.Context, input *awss3.PutObjectInput, optFns ...func(*awss3.Options)) (*awss3.PutObjectOutput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	m.lastPut = input
 	key := awsString(input.Key)
 	if input.IfNoneMatch != nil && *input.IfNoneMatch == "*" {
 		if _, ok := m.objects[key]; ok {
@@ -268,6 +368,7 @@ func (m *mockClient) CompleteMultipartUpload(ctx context.Context, input *awss3.C
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	m.lastComplete = input
 	key := awsString(input.Key)
 	uploadID := awsString(input.UploadId)
 	upload, ok := m.multipart[uploadID]
