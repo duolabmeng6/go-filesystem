@@ -418,8 +418,8 @@ func (d *Disk) isPrefixOnlyDirectory(ctx context.Context, p string) bool {
 	if !ok || provider.DirectorySemantics() != DirectoryPrefixOnly {
 		return false
 	}
-	if _, err := d.adapter.Stat(ctx, p); err == nil {
-		return false
+	if info, err := d.adapter.Stat(ctx, p); err == nil {
+		return info.IsDir
 	} else if !errors.Is(err, ErrNotFound) {
 		return false
 	}
@@ -440,6 +440,16 @@ func (d *Disk) copyPrefixDirectory(ctx context.Context, source string, destinati
 	}
 	defer it.Close()
 	copied := 0
+	rootMarkerCopied := false
+	if info, err := d.adapter.Stat(ctx, source); err == nil && info.IsDir {
+		if err := d.copyDirectoryMarker(ctx, source, destination); err != nil {
+			return err
+		}
+		copied++
+		rootMarkerCopied = true
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
 	for {
 		entry, err := it.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -452,6 +462,20 @@ func (d *Disk) copyPrefixDirectory(ctx context.Context, source string, destinati
 			return err
 		}
 		if entry.Type != EntryFile {
+			continue
+		}
+		if strings.HasSuffix(entry.Path, "/") {
+			marker := strings.TrimSuffix(entry.Path, "/")
+			if _, err := normalizeNonEmptyPath(marker); err != nil || (marker != source && !strings.HasPrefix(marker, source+"/")) {
+				return ErrInvalidPath
+			}
+			if marker == source && rootMarkerCopied {
+				continue
+			}
+			if err := d.copyDirectoryMarker(ctx, marker, replacePathPrefix(marker, source, destination)); err != nil {
+				return err
+			}
+			copied++
 			continue
 		}
 		target := replacePathPrefix(entry.Path, source, destination)
@@ -475,6 +499,16 @@ func (d *Disk) movePrefixDirectory(ctx context.Context, source string, destinati
 	}
 	defer it.Close()
 	var moved []string
+	rootMarkerCopied := false
+	if info, err := d.adapter.Stat(ctx, source); err == nil && info.IsDir {
+		if err := d.copyDirectoryMarker(ctx, source, destination); err != nil {
+			return err
+		}
+		moved = append(moved, source+"/")
+		rootMarkerCopied = true
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
 	for {
 		entry, err := it.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -498,12 +532,38 @@ func (d *Disk) movePrefixDirectory(ctx context.Context, source string, destinati
 		if entry.Type != EntryFile {
 			continue
 		}
+		if strings.HasSuffix(entry.Path, "/") {
+			marker := strings.TrimSuffix(entry.Path, "/")
+			if _, err := normalizeNonEmptyPath(marker); err != nil || (marker != source && !strings.HasPrefix(marker, source+"/")) {
+				return ErrInvalidPath
+			}
+			if marker == source && rootMarkerCopied {
+				continue
+			}
+			if err := d.copyDirectoryMarker(ctx, marker, replacePathPrefix(marker, source, destination)); err != nil {
+				return err
+			}
+			moved = append(moved, entry.Path)
+			continue
+		}
 		target := replacePathPrefix(entry.Path, source, destination)
 		if err := d.Copy(ctx, entry.Path, target); err != nil {
 			return err
 		}
 		moved = append(moved, entry.Path)
 	}
+}
+
+func (d *Disk) copyDirectoryMarker(ctx context.Context, source string, destination string) error {
+	if copier, ok := d.adapter.(Copier); ok && d.adapter.Capabilities().Has(CapabilityCopy) {
+		return copier.Copy(ctx, source+"/", destination+"/")
+	}
+	reader, err := d.adapter.Open(ctx, source+"/")
+	if err != nil {
+		return err
+	}
+	writeErr := d.adapter.Write(ctx, destination+"/", reader, DefaultWriteOptions())
+	return errors.Join(writeErr, reader.Close())
 }
 
 func (d *Disk) cleanupMovedPrefixDirectory(ctx context.Context, paths []string) error {
@@ -665,12 +725,40 @@ func (d *Disk) DeleteDirectory(ctx context.Context, dir string) error {
 	for {
 		entry, err := it.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			return flush()
+			if err := flush(); err != nil {
+				return err
+			}
+			// Some S3-compatible servers store a directory as an object ending in '/'.
+			// Listings can omit the marker for the directory being listed.
+			if deleter, ok := d.adapter.(DirectoryMarkerDeleter); ok {
+				if err := deleter.DeleteDirectoryMarker(ctx, normalized); err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrUnsupported) {
+					return newOpError("delete directory marker", d.name, normalized, err)
+				}
+			}
+			return nil
 		}
 		if err != nil {
 			return err
 		}
 		if entry.Type == EntryFile {
+			if strings.HasSuffix(entry.Path, "/") {
+				marker := strings.TrimSuffix(entry.Path, "/")
+				if _, err := normalizeNonEmptyPath(marker); err != nil || (marker != normalized && !strings.HasPrefix(marker, normalized+"/")) {
+					return newOpError("delete directory marker", d.name, entry.Path, ErrInvalidPath)
+				}
+				var err error
+				deleter, ok := d.adapter.(DirectoryMarkerDeleter)
+				if ok {
+					err = deleter.DeleteDirectoryMarker(ctx, marker)
+				}
+				if !ok || errors.Is(err, ErrUnsupported) {
+					err = d.adapter.Delete(ctx, entry.Path)
+				}
+				if err != nil && !errors.Is(err, ErrNotFound) {
+					return newOpError("delete directory marker", d.name, entry.Path, err)
+				}
+				continue
+			}
 			batch = append(batch, entry.Path)
 			if len(batch) >= deleteDirectoryBatchSize {
 				if err := flush(); err != nil {

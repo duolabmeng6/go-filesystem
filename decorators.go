@@ -38,6 +38,13 @@ func (a *scopedAdapter) Delete(ctx context.Context, path string) error {
 	return a.adapter.Delete(ctx, a.apply(path))
 }
 
+func (a *scopedAdapter) DeleteDirectoryMarker(ctx context.Context, dir string) error {
+	if deleter, ok := a.adapter.(DirectoryMarkerDeleter); ok {
+		return deleter.DeleteDirectoryMarker(ctx, a.apply(dir))
+	}
+	return ErrUnsupported
+}
+
 func (a *scopedAdapter) DeleteMany(ctx context.Context, paths []string, opts DeleteOptions) error {
 	deleter, ok := a.adapter.(BulkDeleter)
 	if !ok {

@@ -84,6 +84,46 @@ func TestContracts(t *testing.T) {
 	filesystemtest.RunMultipartContract(t, newTestDisk)
 }
 
+func TestDirectoryMarkersSupportStatCopyMoveAndDelete(t *testing.T) {
+	client := newMockClient()
+	for _, key := range []string{"src/", "src/empty/", "src/nested/", "src/nested/file.txt"} {
+		client.objects[key] = mockObject{data: []byte("content")}
+	}
+	disk, err := NewDisk(Config{Bucket: "bucket", Region: "cn-hangzhou", Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, dir := range []string{"src", "src/empty"} {
+		info, err := disk.Stat(ctx, dir)
+		if err != nil || !info.IsDir {
+			t.Fatalf("stat %q: %#v, %v", dir, info, err)
+		}
+		if exists, err := disk.Exists(ctx, dir); err != nil || !exists {
+			t.Fatalf("exists %q: %v, %v", dir, exists, err)
+		}
+	}
+	if err := disk.Copy(ctx, "src", "copy"); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if err := disk.Move(ctx, "src", "moved"); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if err := disk.DeleteDirectory(ctx, "copy"); err != nil {
+		t.Fatalf("delete copy: %v", err)
+	}
+	for _, key := range []string{"moved/", "moved/empty/", "moved/nested/", "moved/nested/file.txt"} {
+		if _, ok := client.objects[key]; !ok {
+			t.Errorf("expected object %q", key)
+		}
+	}
+	for _, key := range []string{"src/", "src/empty/", "src/nested/", "src/nested/file.txt", "copy/", "copy/empty/", "copy/nested/", "copy/nested/file.txt"} {
+		if _, ok := client.objects[key]; ok {
+			t.Errorf("unexpected object %q", key)
+		}
+	}
+}
+
 func TestTemporaryURL(t *testing.T) {
 	disk := newTestDisk(t)
 	got, err := disk.TemporaryURL(context.Background(), "a.txt", time.Now().Add(time.Hour))

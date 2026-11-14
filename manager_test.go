@@ -270,6 +270,51 @@ func TestPrefixOnlyDirectoryCopyAndDelete(t *testing.T) {
 	}
 }
 
+func TestPrefixOnlyDeleteDirectoryRemovesSlashMarkers(t *testing.T) {
+	adapter := newPrefixOnlyMemoryAdapter()
+	adapter.files["dir/"] = nil
+	adapter.files["dir/nested/"] = nil
+	adapter.files["dir/nested/a.txt"] = []byte("a")
+	adapter.files["dir-other/keep.txt"] = []byte("keep")
+	disk := NewDisk(adapter)
+	if err := disk.DeleteDirectory(context.Background(), "dir"); err != nil {
+		t.Fatalf("delete directory containing slash markers: %v", err)
+	}
+	for _, key := range []string{"dir/", "dir/nested/", "dir/nested/a.txt"} {
+		if _, exists := adapter.files[key]; exists {
+			t.Errorf("object %q was not deleted", key)
+		}
+	}
+	if _, exists := adapter.files["dir-other/keep.txt"]; !exists {
+		t.Fatal("deleted object outside target directory")
+	}
+}
+
+func TestPrefixOnlyCopyAndMoveDirectoryMarkers(t *testing.T) {
+	adapter := newPrefixOnlyMemoryAdapter()
+	for _, key := range []string{"dir/", "dir/empty/", "dir/nested/a.txt"} {
+		adapter.files[key] = []byte(key)
+	}
+	disk := NewDisk(adapter)
+	ctx := context.Background()
+	if err := disk.Copy(ctx, "dir", "copy"); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if err := disk.Move(ctx, "dir", "moved"); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	for _, key := range []string{"copy/", "copy/empty/", "copy/nested/a.txt", "moved/", "moved/empty/", "moved/nested/a.txt"} {
+		if _, ok := adapter.files[key]; !ok {
+			t.Errorf("object %q was not created", key)
+		}
+	}
+	for _, key := range []string{"dir/", "dir/empty/", "dir/nested/a.txt"} {
+		if _, ok := adapter.files[key]; ok {
+			t.Errorf("source %q remains", key)
+		}
+	}
+}
+
 type prefixOnlyMemoryAdapter struct {
 	*memoryAdapter
 	modified map[string]time.Time

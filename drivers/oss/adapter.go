@@ -87,6 +87,11 @@ func (a *Adapter) Delete(ctx context.Context, path string) error {
 	return mapError(err)
 }
 
+func (a *Adapter) DeleteDirectoryMarker(ctx context.Context, dir string) error {
+	_, err := a.client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(a.bucket), Key: aliyunoss.Ptr(dir + "/")})
+	return mapError(err)
+}
+
 func (a *Adapter) DeleteMany(ctx context.Context, paths []string, opts filesystem.DeleteOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -138,7 +143,7 @@ func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	_, err := a.head(ctx, path)
+	_, err := a.Stat(ctx, path)
 	if errors.Is(err, filesystem.ErrNotFound) {
 		return false, nil
 	}
@@ -153,6 +158,11 @@ func (a *Adapter) Stat(ctx context.Context, path string) (filesystem.FileInfo, e
 		return filesystem.FileInfo{}, err
 	}
 	result, err := a.head(ctx, path)
+	isDir := false
+	if errors.Is(err, filesystem.ErrNotFound) {
+		result, err = a.head(ctx, path+"/")
+		isDir = err == nil
+	}
 	if err != nil {
 		return filesystem.FileInfo{}, err
 	}
@@ -164,7 +174,7 @@ func (a *Adapter) Stat(ctx context.Context, path string) (filesystem.FileInfo, e
 		Path:         path,
 		Size:         result.ContentLength,
 		LastModified: modified,
-		IsDir:        false,
+		IsDir:        isDir,
 	}, nil
 }
 

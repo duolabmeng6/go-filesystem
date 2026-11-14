@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/duolabmeng6/go-filesystem"
 	"github.com/duolabmeng6/go-filesystem/filesystemtest"
 )
@@ -65,6 +67,11 @@ func runEnvIntegrationContracts(t *testing.T, envPrefix string) {
 		filesystemtest.RunVisibilityContract(t, newDisk)
 	}
 	filesystemtest.RunPathSafetyContract(t, newDisk)
+	runIntegrationDirectoryMarkers(t, Config{
+		Bucket: bucket, Region: region, Endpoint: endpoint,
+		AccessKeyID: accessKeyID, AccessKeySecret: accessKeySecret, SessionToken: sessionToken,
+		UsePathStyle: boolEnv(envName(envPrefix, "TEST_USE_PATH_STYLE")), DisableACL: disableACL,
+	}, prefix+"/directory-markers-"+time.Now().UTC().Format("20060102T150405.000000000"))
 	runIntegrationURLContract(t, Config{
 		Bucket:          bucket,
 		Region:          region,
@@ -87,6 +94,58 @@ func runEnvIntegrationContracts(t *testing.T, envPrefix string) {
 		UsePathStyle:    boolEnv(envName(envPrefix, "TEST_USE_PATH_STYLE")),
 		DisableACL:      disableACL,
 		PathPrefix:      prefix + "/temporary-url-contract",
+	})
+}
+
+func runIntegrationDirectoryMarkers(t *testing.T, config Config, prefix string) {
+	t.Helper()
+	t.Run("directory markers", func(t *testing.T) {
+		ctx := context.Background()
+		adapter, err := New(ctx, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scoped, err := filesystem.Scoped(adapter, prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disk := filesystem.NewDisk(scoped)
+		paths := []string{"original/", "original/empty/", "original/nested/", "original/nested/note.txt"}
+		t.Cleanup(func() {
+			for _, dir := range []string{"original", "copy", "moved"} {
+				if err := disk.DeleteDirectory(context.Background(), dir); err != nil {
+					t.Errorf("clean up %s: %v", dir, err)
+				}
+			}
+		})
+		for _, path := range paths {
+			key := prefix + "/" + path
+			if _, err := adapter.client.PutObject(ctx, &awss3.PutObjectInput{Bucket: aws.String(config.Bucket), Key: aws.String(key), Body: strings.NewReader("test content")}); err != nil {
+				t.Fatalf("create %s: %v", path, err)
+			}
+		}
+		for _, path := range []string{"original", "original/empty"} {
+			info, err := disk.Stat(ctx, path)
+			if err != nil || !info.IsDir {
+				t.Fatalf("stat %s: %#v, %v", path, info, err)
+			}
+		}
+		if err := disk.Copy(ctx, "original", "copy"); err != nil {
+			t.Fatalf("copy: %v", err)
+		}
+		if err := disk.Move(ctx, "original", "moved"); err != nil {
+			t.Fatalf("move: %v", err)
+		}
+		for _, dir := range []string{"copy", "moved"} {
+			data, err := disk.Get(ctx, dir+"/nested/note.txt")
+			if err != nil || string(data) != "test content" {
+				t.Fatalf("read %s: %q, %v", dir, data, err)
+			}
+			info, err := disk.Stat(ctx, dir+"/empty")
+			if err != nil || !info.IsDir {
+				t.Fatalf("empty directory %s: %#v, %v", dir, info, err)
+			}
+		}
 	})
 }
 

@@ -91,6 +91,12 @@ type DirectorySemanticsProvider interface {
 	DirectorySemantics() DirectorySemantics
 }
 
+// DirectoryMarkerDeleter removes an optional object-store directory marker.
+// The directory path is normalized and does not have a trailing slash.
+type DirectoryMarkerDeleter interface {
+	DeleteDirectoryMarker(ctx context.Context, dir string) error
+}
+
 type URLGenerator interface {
 	URL(ctx context.Context, path string) (string, error)
 }
