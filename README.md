@@ -279,6 +279,8 @@ manager, err := filesystem.NewFromConfig(ctx, filesystem.Config{
 - [快速入门](docs/快速入门.md)
 - [配置本地磁盘](docs/配置本地磁盘.md)
 - [配置对象存储](docs/配置对象存储.md)
+- [配置 SMB 网络共享](docs/配置SMB网络共享.md)
+- [配置 WebDAV](docs/配置WebDAV.md)
 - [上传下载与文件管理](docs/上传下载与文件管理.md)
 - [生成公开链接和临时链接](docs/生成链接.md)
 - [在测试中使用 Fake](docs/测试.md)
