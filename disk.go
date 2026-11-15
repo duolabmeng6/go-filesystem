@@ -381,6 +381,51 @@ func (d *Disk) Move(ctx context.Context, src string, dst string) error {
 	return nil
 }
 
+// CopyNoReplace copies a file without replacing an existing destination.
+// It returns ErrUnsupported when the adapter cannot guarantee this behavior.
+func (d *Disk) CopyNoReplace(ctx context.Context, src, dst string) error {
+	return d.noReplace(ctx, src, dst, false)
+}
+
+// MoveNoReplace moves an entry without replacing an existing destination.
+// It returns ErrUnsupported when the adapter cannot guarantee this behavior.
+func (d *Disk) MoveNoReplace(ctx context.Context, src, dst string) error {
+	return d.noReplace(ctx, src, dst, true)
+}
+
+func (d *Disk) noReplace(ctx context.Context, src, dst string, move bool) error {
+	op := "copy_no_replace"
+	if move {
+		op = "move_no_replace"
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source, err := normalizeNonEmptyPath(src)
+	if err != nil {
+		return newOpError(op, d.name, src, err)
+	}
+	destination, err := normalizeNonEmptyPath(dst)
+	if err != nil {
+		return newOpError(op, d.name, dst, err)
+	}
+	if isReadOnlyAdapter(d.adapter) {
+		return newOpError(op, d.name, destination, ErrReadOnly)
+	}
+	if move {
+		mover, ok := d.adapter.(NoReplaceMover)
+		if !ok || !d.adapter.Capabilities().Has(CapabilityMoveNoReplace) {
+			return newOpError(op, d.name, destination, ErrUnsupported)
+		}
+		return newOpError(op, d.name, destination, mover.MoveNoReplace(ctx, source, destination))
+	}
+	copier, ok := d.adapter.(NoReplaceCopier)
+	if !ok || !d.adapter.Capabilities().Has(CapabilityCopyNoReplace) {
+		return newOpError(op, d.name, destination, ErrUnsupported)
+	}
+	return newOpError(op, d.name, destination, copier.CopyNoReplace(ctx, source, destination))
+}
+
 func (d *Disk) Stat(ctx context.Context, p string) (FileInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return FileInfo{}, err

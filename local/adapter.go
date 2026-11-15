@@ -65,6 +65,9 @@ func New(config Config) (*Adapter, error) {
 	if multipartLockSupported {
 		caps[filesystem.CapabilityMultipart] = struct{}{}
 	}
+	if noReplaceSupported {
+		caps[filesystem.CapabilityMoveNoReplace] = struct{}{}
+	}
 	if config.BaseURL != "" {
 		caps[filesystem.CapabilityURL] = struct{}{}
 	}
@@ -286,6 +289,14 @@ func (a *Adapter) Move(ctx context.Context, src string, dst string) error {
 		return mapLocalError(err)
 	}
 	return nil
+}
+
+func (a *Adapter) CopyNoReplace(ctx context.Context, src, dst string) error {
+	return a.copyNoReplace(ctx, src, dst)
+}
+
+func (a *Adapter) MoveNoReplace(ctx context.Context, src, dst string) error {
+	return a.moveNoReplace(ctx, src, dst)
 }
 
 func (a *Adapter) MakeDirectory(ctx context.Context, dir string, opts filesystem.DirectoryOptions) error {

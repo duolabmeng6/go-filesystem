@@ -9,13 +9,15 @@ import (
 type Capability string
 
 const (
-	CapabilityCopy         Capability = "copy"
-	CapabilityMove         Capability = "move"
-	CapabilityDirectory    Capability = "directory"
-	CapabilityURL          Capability = "url"
-	CapabilityTemporaryURL Capability = "temporary_url"
-	CapabilityVisibility   Capability = "visibility"
-	CapabilityMultipart    Capability = "multipart_upload"
+	CapabilityCopy          Capability = "copy"
+	CapabilityMove          Capability = "move"
+	CapabilityCopyNoReplace Capability = "copy_no_replace"
+	CapabilityMoveNoReplace Capability = "move_no_replace"
+	CapabilityDirectory     Capability = "directory"
+	CapabilityURL           Capability = "url"
+	CapabilityTemporaryURL  Capability = "temporary_url"
+	CapabilityVisibility    Capability = "visibility"
+	CapabilityMultipart     Capability = "multipart_upload"
 )
 
 type CapabilitySet map[Capability]struct{}
@@ -72,6 +74,20 @@ type Copier interface {
 
 type Mover interface {
 	Move(ctx context.Context, src string, dst string) error
+}
+
+// NoReplaceCopier atomically creates the destination only when no file or
+// directory exists at that path. Implementations must not replace a destination
+// created concurrently. Directory copies need not be supported.
+type NoReplaceCopier interface {
+	CopyNoReplace(ctx context.Context, src string, dst string) error
+}
+
+// NoReplaceMover atomically moves an entry only when no file or directory
+// exists at the destination. It does not guarantee that the source entry has
+// not changed concurrently.
+type NoReplaceMover interface {
+	MoveNoReplace(ctx context.Context, src string, dst string) error
 }
 
 type DirectoryManager interface {

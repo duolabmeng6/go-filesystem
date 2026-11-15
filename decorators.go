@@ -114,6 +114,22 @@ func (a *scopedAdapter) Move(ctx context.Context, src string, dst string) error 
 	return mover.Move(ctx, a.apply(src), a.apply(dst))
 }
 
+func (a *scopedAdapter) CopyNoReplace(ctx context.Context, src, dst string) error {
+	copier, ok := a.adapter.(NoReplaceCopier)
+	if !ok {
+		return ErrUnsupported
+	}
+	return copier.CopyNoReplace(ctx, a.apply(src), a.apply(dst))
+}
+
+func (a *scopedAdapter) MoveNoReplace(ctx context.Context, src, dst string) error {
+	mover, ok := a.adapter.(NoReplaceMover)
+	if !ok {
+		return ErrUnsupported
+	}
+	return mover.MoveNoReplace(ctx, a.apply(src), a.apply(dst))
+}
+
 func (a *scopedAdapter) MakeDirectory(ctx context.Context, dir string, opts DirectoryOptions) error {
 	manager, ok := a.adapter.(DirectoryManager)
 	if !ok {
@@ -259,7 +275,7 @@ func (a *readOnlyAdapter) ListPage(ctx context.Context, prefix string, opts List
 }
 
 func (a *readOnlyAdapter) Capabilities() CapabilitySet {
-	return a.adapter.Capabilities().Without(CapabilityCopy, CapabilityMove, CapabilityDirectory, CapabilityMultipart)
+	return a.adapter.Capabilities().Without(CapabilityCopy, CapabilityMove, CapabilityCopyNoReplace, CapabilityMoveNoReplace, CapabilityDirectory, CapabilityMultipart)
 }
 
 func (a *readOnlyAdapter) Copy(context.Context, string, string) error {
@@ -269,6 +285,9 @@ func (a *readOnlyAdapter) Copy(context.Context, string, string) error {
 func (a *readOnlyAdapter) Move(context.Context, string, string) error {
 	return ErrReadOnly
 }
+
+func (a *readOnlyAdapter) CopyNoReplace(context.Context, string, string) error { return ErrReadOnly }
+func (a *readOnlyAdapter) MoveNoReplace(context.Context, string, string) error { return ErrReadOnly }
 
 func (a *readOnlyAdapter) MakeDirectory(context.Context, string, DirectoryOptions) error {
 	return ErrReadOnly
