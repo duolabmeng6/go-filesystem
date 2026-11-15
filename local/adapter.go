@@ -117,7 +117,7 @@ func (a *Adapter) Write(ctx context.Context, path string, r io.Reader, opts file
 		return err
 	}
 	if opts.AtomicWrite {
-		return a.atomicWrite(ctx, target, r, visibility)
+		return a.atomicWrite(ctx, target, r, visibility, opts.Overwrite)
 	}
 	return a.directWrite(ctx, target, r, visibility, opts.Overwrite)
 }
@@ -434,7 +434,7 @@ func (a *Adapter) MimeType(ctx context.Context, path string) (string, error) {
 	return http.DetectContentType(buf[:n]), nil
 }
 
-func (a *Adapter) atomicWrite(ctx context.Context, target string, r io.Reader, visibility filesystem.Visibility) error {
+func (a *Adapter) atomicWrite(ctx context.Context, target string, r io.Reader, visibility filesystem.Visibility, overwrite bool) error {
 	temp, err := os.CreateTemp(filepath.Dir(target), ".tmp-"+filepath.Base(target)+"-*")
 	if err != nil {
 		return mapLocalError(err)
@@ -456,6 +456,20 @@ func (a *Adapter) atomicWrite(ctx context.Context, target string, r io.Reader, v
 	}
 	if err := temp.Close(); err != nil {
 		return mapLocalError(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !overwrite {
+		// Linking commits the completed file only if the target does not exist.
+		if err := os.Link(tempName, target); err != nil {
+			return mapLocalError(err)
+		}
+		if err := os.Remove(tempName); err != nil {
+			return fmt.Errorf("%w: file written but temporary file cleanup failed: %w", filesystem.ErrPartialFailure, err)
+		}
+		cleanup = false
+		return nil
 	}
 	if err := os.Rename(tempName, target); err != nil {
 		return mapLocalError(err)
