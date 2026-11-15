@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ type dirtySnapshot struct {
 	Content     []byte
 	BaseExists  bool
 	BaseContent []byte
+	BaseMode    os.FileMode
 	Untracked   bool
 	Mode        os.FileMode
 }
@@ -883,6 +885,11 @@ func setHeadBranch(repo *gogit.Repository, branch string) error {
 }
 
 func (a *Adapter) snapshotDirtyLocked() ([]dirtySnapshot, error) {
+	root, err := os.OpenRoot(a.files.Root())
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	status, err := a.worktree.StatusWithOptions(gogit.StatusOptions{Strategy: gogit.Preload})
 	if err != nil {
 		return nil, mapGitError(err)
@@ -910,14 +917,18 @@ func (a *Adapter) snapshotDirtyLocked() ([]dirtySnapshot, error) {
 			Path:      path,
 			Untracked: file.Worktree == gogit.Untracked || file.Staging == gogit.Untracked,
 		}
-		baseExists, baseContent, err := a.headFileContentLocked(path)
+		baseExists, baseContent, baseMode, err := a.headFileContentLocked(path)
 		if err != nil {
 			return nil, err
 		}
 		snapshot.BaseExists = baseExists
 		snapshot.BaseContent = baseContent
-		localPath := filepath.Join(a.files.Root(), filepath.FromSlash(path))
-		info, err := os.Lstat(localPath)
+		snapshot.BaseMode = baseMode
+		localPath, err := safeSyncPath(root, path)
+		if err != nil {
+			return nil, err
+		}
+		info, err := root.Lstat(localPath)
 		if err == nil && info.IsDir() {
 			continue
 		}
@@ -925,7 +936,7 @@ func (a *Adapter) snapshotDirtyLocked() ([]dirtySnapshot, error) {
 			if !info.Mode().IsRegular() {
 				return nil, fmt.Errorf("不能安全同步非常规文件 %s", path)
 			}
-			content, readErr := os.ReadFile(localPath)
+			content, readErr := root.ReadFile(localPath)
 			if readErr != nil {
 				return nil, mapLocalStatError(readErr)
 			}
@@ -1002,8 +1013,16 @@ func (a *Adapter) rollbackSnapshotsLocked(snapshots []dirtySnapshot, backup stri
 }
 
 func (a *Adapter) rollbackSnapshotLocked(snapshot dirtySnapshot) error {
-	target := filepath.Join(a.files.Root(), filepath.FromSlash(snapshot.Path))
-	info, err := os.Lstat(target)
+	root, err := os.OpenRoot(a.files.Root())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	target, err := safeSyncPath(root, snapshot.Path)
+	if err != nil {
+		return err
+	}
+	info, err := root.Lstat(target)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -1013,53 +1032,67 @@ func (a *Adapter) rollbackSnapshotLocked(snapshot dirtySnapshot) error {
 		if !info.Mode().IsRegular() {
 			return errors.New("恢复目标已被其他文件占用")
 		}
-		content, err = os.ReadFile(target)
+		content, err = root.ReadFile(target)
 		if err != nil {
 			return err
 		}
 	}
-	if exists == snapshot.Exists && (!exists || bytes.Equal(content, snapshot.Content)) {
+	if exists == snapshot.Exists && (!exists || (bytes.Equal(content, snapshot.Content) && info.Mode().Perm() == snapshot.Mode)) {
 		return nil
 	}
-	if exists != snapshot.BaseExists || (exists && !bytes.Equal(content, snapshot.BaseContent)) {
+	if exists != snapshot.BaseExists || (exists && (!bytes.Equal(content, snapshot.BaseContent) || (runtime.GOOS != "windows" && info.Mode().Perm()&0o100 != snapshot.BaseMode&0o100))) {
 		return errors.New("恢复期间目标已发生其他修改，未覆盖当前内容")
 	}
 	if !snapshot.Exists {
-		return os.Remove(target)
+		return root.Remove(target)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(target, snapshot.Content, snapshot.Mode)
+	return writeSnapshotFile(root, target, snapshot.Content, snapshot.Mode)
 }
 
-func (a *Adapter) headFileContentLocked(path string) (bool, []byte, error) {
+func (a *Adapter) headFileContentLocked(path string) (bool, []byte, os.FileMode, error) {
 	head, err := a.repo.Head()
 	if err != nil {
 		if isReferenceNotFoundError(err) {
-			return false, nil, nil
+			return false, nil, 0, nil
 		}
-		return false, nil, mapGitError(err)
+		return false, nil, 0, mapGitError(err)
 	}
 	commit, err := a.repo.CommitObject(head.Hash())
 	if err != nil {
-		return false, nil, mapGitError(err)
+		return false, nil, 0, mapGitError(err)
 	}
 	file, err := commit.File(path)
 	if err != nil {
 		if errors.Is(err, object.ErrFileNotFound) {
-			return false, nil, nil
+			return false, nil, 0, nil
 		}
-		return false, nil, mapGitError(err)
+		return false, nil, 0, mapGitError(err)
 	}
 	content, err := file.Contents()
 	if err != nil {
-		return false, nil, mapGitError(err)
+		return false, nil, 0, mapGitError(err)
 	}
-	return true, []byte(content), nil
+	mode, err := file.Mode.ToOSFileMode()
+	if err != nil {
+		return false, nil, 0, err
+	}
+	return true, []byte(content), mode.Perm(), nil
 }
 
 func (a *Adapter) cleanWorktreeLocked(snapshots []dirtySnapshot) error {
+	root, err := os.OpenRoot(a.files.Root())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for _, snapshot := range snapshots {
+		if _, err := safeSyncPath(root, snapshot.Path); err != nil {
+			return err
+		}
+	}
 	if _, err := a.repo.Head(); err == nil {
 		if err := a.worktree.Reset(&gogit.ResetOptions{Mode: gogit.HardReset}); err != nil {
 			return mapGitError(err)
@@ -1071,7 +1104,11 @@ func (a *Adapter) cleanWorktreeLocked(snapshots []dirtySnapshot) error {
 		if !snapshot.Untracked {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(a.files.Root(), filepath.FromSlash(snapshot.Path))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		path, err := safeSyncPath(root, snapshot.Path)
+		if err != nil {
+			return err
+		}
+		if err := root.RemoveAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -1079,9 +1116,18 @@ func (a *Adapter) cleanWorktreeLocked(snapshots []dirtySnapshot) error {
 }
 
 func (a *Adapter) restoreSnapshotsLocked(snapshots []dirtySnapshot, at time.Time) error {
+	root, err := os.OpenRoot(a.files.Root())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	var deletedConflicts []string
 	for _, snapshot := range snapshots {
-		target := filepath.Join(a.files.Root(), filepath.FromSlash(snapshot.Path))
-		info, err := os.Lstat(target)
+		target, err := safeSyncPath(root, snapshot.Path)
+		if err != nil {
+			return err
+		}
+		info, err := root.Lstat(target)
 		remoteExists := err == nil
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return mapLocalStatError(err)
@@ -1091,43 +1137,93 @@ func (a *Adapter) restoreSnapshotsLocked(snapshots []dirtySnapshot, at time.Time
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("不能安全覆盖非常规文件 %s", snapshot.Path)
 			}
-			remoteContent, err = os.ReadFile(target)
+			remoteContent, err = root.ReadFile(target)
 			if err != nil {
 				return mapLocalStatError(err)
 			}
 		}
-		if snapshot.Exists && remoteChangedSinceSnapshot(snapshot, remoteExists, remoteContent) {
+		headExists, headContent, headMode, err := a.headFileContentLocked(snapshot.Path)
+		if err != nil {
+			return err
+		}
+		if remoteExists != headExists || (remoteExists && !bytes.Equal(remoteContent, headContent)) {
+			return fmt.Errorf("恢复期间目标已发生其他修改，未覆盖当前内容: %s", snapshot.Path)
+		}
+		if snapshot.Exists && snapshot.BaseExists && !remoteExists {
+			deletedConflicts = append(deletedConflicts, snapshot.Path)
+		}
+		if remoteExists && remoteChangedSinceSnapshot(snapshot, remoteExists, remoteContent, headMode) {
 			conflictPath := ConflictFileName(snapshot.Path, at)
-			if err := a.writeConflictCopyLocked(conflictPath, remoteContent); err != nil {
+			if err := a.writeConflictCopyLocked(root, conflictPath, remoteContent, info.Mode().Perm()); err != nil {
 				return err
 			}
 		}
 		if !snapshot.Exists {
-			if remoteChangedSinceSnapshot(snapshot, remoteExists, remoteContent) {
-				conflictPath := ConflictFileName(snapshot.Path, at)
-				if err := a.writeConflictCopyLocked(conflictPath, remoteContent); err != nil {
-					return err
-				}
-			}
-			if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := root.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(target, snapshot.Content, 0o600); err != nil {
+		if err := writeSnapshotFile(root, target, snapshot.Content, snapshot.Mode); err != nil {
 			return err
 		}
+	}
+	if len(deletedConflicts) > 0 {
+		return fmt.Errorf("远端已删除文件，已保留本地修改并停止提交和推送: %s", strings.Join(deletedConflicts, ", "))
 	}
 	return nil
 }
 
+func writeSnapshotFile(root *os.Root, path string, content []byte, mode os.FileMode) error {
+	file, err := root.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(content)
+	if writeErr == nil {
+		writeErr = file.Chmod(mode.Perm())
+	}
+	return errors.Join(writeErr, file.Close())
+}
+
+// Reject symlinked parent directories, and use os.Root for every subsequent
+// operation so a concurrent replacement cannot redirect access outside root.
+func safeSyncPath(root *os.Root, path string) (string, error) {
+	path = filepath.FromSlash(path)
+	if !filepath.IsLocal(path) {
+		return "", fmt.Errorf("不能安全访问仓库路径 %q", path)
+	}
+	parent := filepath.Dir(path)
+	current := "."
+	for _, part := range strings.Split(parent, string(os.PathSeparator)) {
+		if part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := root.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("不能安全访问非常规目录 %s", current)
+		}
+	}
+	return path, nil
+}
+
 // An existing conflict copy belongs to the user and must never be replaced.
-func (a *Adapter) writeConflictCopyLocked(conflictPath string, content []byte) error {
-	target := filepath.Join(a.files.Root(), filepath.FromSlash(conflictPath))
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+func (a *Adapter) writeConflictCopyLocked(root *os.Root, conflictPath string, content []byte, mode os.FileMode) error {
+	target, err := safeSyncPath(root, conflictPath)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
 	ext := filepath.Ext(target)
@@ -1137,7 +1233,7 @@ func (a *Adapter) writeConflictCopyLocked(conflictPath string, content []byte) e
 		if index > 0 {
 			candidate = fmt.Sprintf("%s-%d%s", stem, index, ext)
 		}
-		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		file, err := root.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
@@ -1145,21 +1241,24 @@ func (a *Adapter) writeConflictCopyLocked(conflictPath string, content []byte) e
 			return err
 		}
 		_, writeErr := file.Write(content)
+		if writeErr == nil {
+			writeErr = file.Chmod(mode.Perm())
+		}
 		if err := errors.Join(writeErr, file.Close()); err != nil {
-			return errors.Join(err, os.Remove(candidate))
+			return errors.Join(err, root.Remove(candidate))
 		}
 		return nil
 	}
 }
 
-func remoteChangedSinceSnapshot(snapshot dirtySnapshot, remoteExists bool, remoteContent []byte) bool {
+func remoteChangedSinceSnapshot(snapshot dirtySnapshot, remoteExists bool, remoteContent []byte, remoteMode os.FileMode) bool {
 	if snapshot.BaseExists != remoteExists {
 		return true
 	}
 	if !snapshot.BaseExists {
 		return false
 	}
-	return !bytes.Equal(remoteContent, snapshot.BaseContent)
+	return !bytes.Equal(remoteContent, snapshot.BaseContent) || snapshot.BaseMode&0o100 != remoteMode&0o100
 }
 
 func (a *Adapter) pruneEmptyDirectoriesLocked() error {

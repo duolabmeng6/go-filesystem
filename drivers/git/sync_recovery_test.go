@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/duolabmeng6/go-filesystem/local"
+	gogit "github.com/go-git/go-git/v5"
 )
 
 func TestSyncFailedPullRestoresLocalChanges(t *testing.T) {
@@ -132,7 +134,7 @@ func TestSyncConflictCopyDoesNotOverwriteExistingFile(t *testing.T) {
 	}
 	if err := adapter.restoreSnapshotsLocked([]dirtySnapshot{{
 		Path: "docs/a.txt", Exists: true, Content: []byte("local"),
-		BaseExists: true, BaseContent: []byte("old remote"),
+		BaseExists: true, BaseContent: []byte("old remote"), Mode: 0o644, BaseMode: 0o644,
 	}}, at); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +147,335 @@ func TestSyncConflictCopyDoesNotOverwriteExistingFile(t *testing.T) {
 	data, err = os.ReadFile(second)
 	if err != nil || string(data) != "base" {
 		t.Fatalf("new conflict missing: %q, %v", data, err)
+	}
+}
+
+func TestSyncPreservesLocalFileModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not available")
+	}
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: seedBareRepository(t), Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked := filepath.Join(root, "docs/a.txt")
+	untracked := filepath.Join(root, "docs/new.sh")
+	if err := os.WriteFile(tracked, []byte("local edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tracked, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(untracked, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untracked, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Sync(context.Background(), "sync modes"); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]os.FileMode{tracked: 0o750, untracked: 0o711} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != want {
+			t.Fatalf("%s: got %v, error %v; want %o", path, info, err, want)
+		}
+	}
+}
+
+func TestSyncFailedPullRestoresModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not available")
+	}
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked := filepath.Join(root, "docs/a.txt")
+	untracked := filepath.Join(root, "docs/new.sh")
+	if err := os.WriteFile(tracked, []byte("local edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tracked, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(untracked, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untracked, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parsed.Path, parsed.Path+"-unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Sync(context.Background(), "sync"); err == nil {
+		t.Fatal("expected pull failure")
+	}
+	for path, want := range map[string]os.FileMode{tracked: 0o750, untracked: 0o711} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != want {
+			t.Fatalf("%s: got %v, error %v; want %o", path, info, err, want)
+		}
+	}
+}
+
+func TestSyncRestoresPermissionOnlyChangeAfterFailedPull(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not available")
+	}
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "docs/a.txt")
+	if err := os.Chmod(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parsed.Path, parsed.Path+"-unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Sync(context.Background(), "sync"); err == nil {
+		t.Fatal("expected pull failure")
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("permission-only change lost: %v, %v", info, err)
+	}
+}
+
+func TestSyncConflictCopyRetainsRemoteMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not available")
+	}
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(root, "docs/a.txt")
+	if err := os.WriteFile(local, []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(local, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	other := cloneRepository(t, remote)
+	repo, err := gogit.PlainOpen(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteFile := filepath.Join(other, "docs/a.txt")
+	if err := os.WriteFile(remoteFile, []byte("remote"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(remoteFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commitAndPush(t, repo, "remote edit")
+	if err := adapter.Sync(context.Background(), "sync"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(local)
+	if err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("local mode: %v, %v", info, err)
+	}
+	copies, err := filepath.Glob(filepath.Join(root, "docs", "*远端版本*"))
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("conflict copies: %v, %v", copies, err)
+	}
+	data, err := os.ReadFile(copies[0])
+	if err != nil || string(data) != "remote" {
+		t.Fatalf("remote copy: %q, %v", data, err)
+	}
+	info, err = os.Stat(copies[0])
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("remote copy mode: %v, %v", info, err)
+	}
+}
+
+func TestSyncConflictUsesGitModeInsteadOfWorktreeMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires changing POSIX permission bits")
+	}
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := cloneRepository(t, remote)
+	repo, err := gogit.PlainOpen(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(other, "docs/a.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commitAndPush(t, repo, "remote chmod")
+	if err := adapter.pullLocked(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, "docs/a.txt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := dirtySnapshot{Path: "docs/a.txt", Exists: true, Content: []byte("local"), Mode: 0o644, BaseExists: true, BaseContent: []byte("base"), BaseMode: 0o644}
+	if err := adapter.restoreSnapshotsLocked([]dirtySnapshot{snapshot}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := filepath.Glob(filepath.Join(root, "docs", "*远端版本*"))
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("missing Git mode conflict: %v, %v", copies, err)
+	}
+	info, err := os.Stat(copies[0])
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("worktree permissions not preserved: %v, %v", info, err)
+	}
+}
+
+func TestSyncConflictCopyRespectsUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix umask is not available")
+	}
+	if os.Getenv("GOFILESYSTEM_TEST_UMASK") != "1" {
+		cmd := exec.Command("/bin/sh", "-c", `umask 077; exec "$@"`, "umask-test", os.Args[0], "-test.run=^TestSyncConflictCopyRespectsUmask$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "GOFILESYSTEM_TEST_UMASK=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("umask subprocess failed: %v\n%s", err, output)
+		}
+		return
+	}
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(root, "docs/a.txt")
+	if err := os.WriteFile(local, []byte("local edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updateRemoteFile(t, remote, "docs/a.txt", "remote edit")
+	if err := adapter.Sync(context.Background(), "sync"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(local)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("local permissions changed: %v, %v", info, err)
+	}
+	copies, err := filepath.Glob(filepath.Join(root, "docs", "*远端版本*"))
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("expected conflict copy: %v, %v", copies, err)
+	}
+	info, err = os.Stat(copies[0])
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("umask permissions lost: %v, %v", info, err)
+	}
+}
+
+func TestSyncRejectsSymlinkedParentDuringRestore(t *testing.T) {
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: seedBareRepository(t), Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	target := filepath.Join(outside, "a.txt")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "docs")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	snapshot := dirtySnapshot{Path: "docs/a.txt", Exists: true, Content: []byte("local"), Mode: 0o644, BaseExists: true, BaseContent: []byte("base"), BaseMode: 0o644}
+	if err := adapter.restoreSnapshotsLocked([]dirtySnapshot{snapshot}, time.Now()); err == nil {
+		t.Fatal("restore accepted symlinked parent")
+	}
+	if err := adapter.rollbackSnapshotLocked(snapshot); err == nil {
+		t.Fatal("rollback accepted symlinked parent")
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "outside" {
+		t.Fatalf("outside file changed: %q, %v", content, err)
+	}
+}
+
+func TestSyncRemoteDeletionRetainsLocalChangesAndBlocksPush(t *testing.T) {
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs/a.txt"), []byte("local edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs/new.txt"), []byte("new file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeRemotePath(t, remote, "docs/a.txt")
+	err = adapter.Sync(context.Background(), "must not push")
+	if err == nil || !strings.Contains(err.Error(), "远端已删除") {
+		t.Fatalf("expected deletion conflict, got %v", err)
+	}
+	for name, want := range map[string]string{"docs/a.txt": "local edit", "docs/new.txt": "new file"} {
+		got, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s: got %q, error %v", name, got, err)
+		}
+	}
+	conflicts, err := filepath.Glob(filepath.Join(root, "docs", "*远端版本*"))
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("unexpected remote placeholder: %v, %v", conflicts, err)
+	}
+	backups, err := filepath.Glob(filepath.Join(root, ".git", "go-filesystem-sync-*", "snapshots.jsonl"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("expected retained backup: %v, %v", backups, err)
+	}
+	if err := adapter.Sync(context.Background(), "retry"); err == nil || !strings.Contains(err.Error(), filepath.Dir(backups[0])) {
+		t.Fatalf("retry did not stop: %v", err)
+	}
+	remoteRoot := cloneRepository(t, remote)
+	for _, name := range []string{"docs/a.txt", "docs/new.txt"} {
+		if _, err := os.Stat(filepath.Join(remoteRoot, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected pushed file %s: %v", name, err)
+		}
+	}
+}
+
+func TestSyncBothSidesDeleteWithoutFakeConflictFile(t *testing.T) {
+	remote := seedBareRepository(t)
+	root := t.TempDir()
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "docs/a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	removeRemotePath(t, remote, "docs/a.txt")
+	if err := adapter.Sync(context.Background(), "sync deletions"); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := filepath.Glob(filepath.Join(root, "docs", "*远端版本*"))
+	if err != nil || len(copies) != 0 {
+		t.Fatalf("unexpected remote placeholder: %v, %v", copies, err)
 	}
 }
 
