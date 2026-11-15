@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/duolabmeng6/go-filesystem"
 )
 
@@ -121,12 +123,30 @@ func (a *Adapter) Open(ctx context.Context, path string) (io.ReadCloser, error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	output, err := a.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: &a.bucket, Key: &path})
+	output, err := a.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: &a.bucket, Key: &path}, func(options *awss3.Options) {
+		options.APIOptions = append(options.APIOptions, awsmiddleware.AddRawResponseToMetadata)
+	})
 	if err != nil {
+		if output != nil && output.Body != nil {
+			_ = output.Body.Close()
+		}
 		return nil, mapError(err)
 	}
+	if output == nil {
+		return nil, fmt.Errorf("s3: empty GetObject response")
+	}
+	status := 0
+	if response, ok := awsmiddleware.GetRawResponse(output.ResultMetadata).(*smithyhttp.Response); ok && response != nil && response.Response != nil {
+		status = response.StatusCode
+	}
+	if output.ContentRange != nil || (status != 0 && status != http.StatusOK && status != http.StatusNonAuthoritativeInfo) {
+		if output.Body != nil {
+			_ = output.Body.Close()
+		}
+		return nil, fmt.Errorf("s3: unexpected partial or incomplete GetObject response (status %d)", status)
+	}
 	if output.Body == nil {
-		return io.NopCloser(strings.NewReader("")), nil
+		return nil, fmt.Errorf("s3: GetObject response has no body")
 	}
 	return output.Body, nil
 }

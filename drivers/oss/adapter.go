@@ -70,10 +70,22 @@ func (a *Adapter) Open(ctx context.Context, path string) (io.ReadCloser, error) 
 		Key:    aliyunoss.Ptr(path),
 	})
 	if err != nil {
+		if result != nil && result.Body != nil {
+			_ = result.Body.Close()
+		}
 		return nil, mapError(err)
 	}
+	if result == nil {
+		return nil, fmt.Errorf("oss: empty GetObject response")
+	}
+	if result.ContentRange != nil || (result.StatusCode != 0 && result.StatusCode != http.StatusOK && result.StatusCode != http.StatusNonAuthoritativeInfo) {
+		if result.Body != nil {
+			_ = result.Body.Close()
+		}
+		return nil, fmt.Errorf("oss: unexpected partial or incomplete GetObject response (status %d)", result.StatusCode)
+	}
 	if result.Body == nil {
-		return io.NopCloser(strings.NewReader("")), nil
+		return nil, fmt.Errorf("oss: GetObject response has no body")
 	}
 	return result.Body, nil
 }
