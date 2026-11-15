@@ -34,6 +34,11 @@ type Adapter struct {
 	capabilities filesystem.CapabilitySet
 }
 
+// Root returns the resolved local worktree root used by this adapter.
+func (a *Adapter) Root() string {
+	return a.files.Root()
+}
+
 type Status struct {
 	Dirty   bool     `json:"dirty"`
 	Changed []string `json:"changed"`

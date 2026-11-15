@@ -139,14 +139,10 @@ func (a *Adapter) Open(ctx context.Context, path string) (io.ReadCloser, error) 
 	if err != nil {
 		return nil, mapLocalError(err)
 	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("%w: cannot open directory", filesystem.ErrUnsupported)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: cannot open non-regular file", filesystem.ErrUnsupported)
 	}
-	file, err := os.Open(target)
-	if err != nil {
-		return nil, mapLocalError(err)
-	}
-	return file, nil
+	return a.openRegularFile(ctx, path, target)
 }
 
 func (a *Adapter) Delete(ctx context.Context, path string) error {

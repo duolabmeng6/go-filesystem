@@ -3,9 +3,30 @@ package filesystem
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+// LocalRoot returns the actual local filesystem root of an adapter, including
+// any Scoped prefix. Remote adapters do not expose a local root.
+func LocalRoot(adapter Adapter) (string, bool) {
+	switch a := adapter.(type) {
+	case *scopedAdapter:
+		root, ok := LocalRoot(a.adapter)
+		if !ok {
+			return "", false
+		}
+		return filepath.Join(root, filepath.FromSlash(a.prefix)), true
+	case *readOnlyAdapter:
+		return LocalRoot(a.adapter)
+	case interface{ Root() string }:
+		root := a.Root()
+		return root, root != ""
+	default:
+		return "", false
+	}
+}
 
 func Scoped(adapter Adapter, prefix string) (Adapter, error) {
 	if adapter == nil {
