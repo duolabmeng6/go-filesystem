@@ -343,6 +343,24 @@ func (a *Adapter) DeleteDirectory(ctx context.Context, dir string) error {
 	return nil
 }
 
+func (a *Adapter) DeleteEmptyDirectory(ctx context.Context, dir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	target, err := a.existingPath(dir)
+	if err != nil {
+		return err
+	}
+	if target == a.root {
+		return fmt.Errorf("%w: refusing to delete root", filesystem.ErrInvalidPath)
+	}
+	relative, err := filepath.Rel(a.root, target)
+	if err != nil {
+		return mapLocalError(err)
+	}
+	return mapLocalError(removeEmptyDirectory(ctx, a.root, relative))
+}
+
 func (a *Adapter) DirectorySemantics() filesystem.DirectorySemantics {
 	return filesystem.DirectoryReal
 }

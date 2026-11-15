@@ -79,6 +79,13 @@ type DirectoryManager interface {
 	DeleteDirectory(ctx context.Context, dir string) error
 }
 
+// EmptyDirectoryDeleter removes a real directory only if it is empty. It must
+// not remove files or recursively remove descendants, even if the path changes
+// concurrently.
+type EmptyDirectoryDeleter interface {
+	DeleteEmptyDirectory(ctx context.Context, dir string) error
+}
+
 type DirectorySemantics string
 
 const (

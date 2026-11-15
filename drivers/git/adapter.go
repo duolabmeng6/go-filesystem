@@ -390,6 +390,18 @@ func (a *Adapter) DeleteDirectory(ctx context.Context, dir string) error {
 	return a.files.DeleteDirectory(ctx, dir)
 }
 
+func (a *Adapter) DeleteEmptyDirectory(ctx context.Context, dir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.ensureWritablePath(ctx, dir, true); err != nil {
+		return err
+	}
+	return a.files.DeleteEmptyDirectory(ctx, dir)
+}
+
 func (a *Adapter) DirectorySemantics() filesystem.DirectorySemantics {
 	return filesystem.DirectoryReal
 }

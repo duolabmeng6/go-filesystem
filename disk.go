@@ -686,6 +686,29 @@ func (d *Disk) MakeDirectory(ctx context.Context, dir string, opts ...DirectoryO
 	return newOpError("make directory", d.name, normalized, ErrUnsupported)
 }
 
+// DeleteEmptyDirectory removes a directory only if the adapter supports an
+// atomic non-recursive directory removal.
+func (d *Disk) DeleteEmptyDirectory(ctx context.Context, dir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	normalized, err := normalizeNonEmptyPath(dir)
+	if err != nil {
+		return newOpError("delete empty directory", d.name, dir, err)
+	}
+	if isReadOnlyAdapter(d.adapter) {
+		return newOpError("delete empty directory", d.name, normalized, ErrReadOnly)
+	}
+	if provider, ok := d.adapter.(DirectorySemanticsProvider); ok && provider.DirectorySemantics() == DirectoryPrefixOnly {
+		return newOpError("delete empty directory", d.name, normalized, ErrUnsupported)
+	}
+	deleter, ok := d.adapter.(EmptyDirectoryDeleter)
+	if !ok {
+		return newOpError("delete empty directory", d.name, normalized, ErrUnsupported)
+	}
+	return newOpError("delete empty directory", d.name, normalized, deleter.DeleteEmptyDirectory(ctx, normalized))
+}
+
 func (d *Disk) DeleteDirectory(ctx context.Context, dir string) error {
 	if err := ctx.Err(); err != nil {
 		return err

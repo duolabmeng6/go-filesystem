@@ -45,6 +45,14 @@ func (a *scopedAdapter) DeleteDirectoryMarker(ctx context.Context, dir string) e
 	return ErrUnsupported
 }
 
+func (a *scopedAdapter) DeleteEmptyDirectory(ctx context.Context, dir string) error {
+	deleter, ok := a.adapter.(EmptyDirectoryDeleter)
+	if !ok {
+		return ErrUnsupported
+	}
+	return deleter.DeleteEmptyDirectory(ctx, a.apply(dir))
+}
+
 func (a *scopedAdapter) DeleteMany(ctx context.Context, paths []string, opts DeleteOptions) error {
 	deleter, ok := a.adapter.(BulkDeleter)
 	if !ok {
