@@ -19,6 +19,8 @@ var (
 	ErrPartialFailure          = errors.New("partial failure")
 	ErrInvalidVisibility       = errors.New("invalid visibility")
 	ErrInvalidExpiration       = errors.New("invalid expiration")
+	// ErrMultipartConflict 表示分片上传发生并发冲突，调用方需要重新创建上传会话。
+	ErrMultipartConflict = errors.New("multipart upload conflict; create a new upload and retry")
 )
 
 type OpError struct {

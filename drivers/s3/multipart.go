@@ -2,12 +2,14 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/duolabmeng6/go-filesystem"
 )
 
@@ -175,7 +177,14 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 			Parts: completed,
 		},
 	}
+	if !opts.Overwrite {
+		input.IfNoneMatch = stringPtr("*")
+	}
 	_, err := a.client.CompleteMultipartUpload(ctx, input)
+	var apiErr smithy.APIError
+	if !opts.Overwrite && errors.As(err, &apiErr) && apiErr.ErrorCode() == "ConditionalRequestConflict" {
+		return fmt.Errorf("%w: %w", filesystem.ErrMultipartConflict, err)
+	}
 	return mapError(err)
 }
 

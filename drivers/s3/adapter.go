@@ -69,6 +69,9 @@ func (a *Adapter) Write(ctx context.Context, path string, r io.Reader, opts file
 		Body:          body,
 		ContentLength: &contentLength,
 	}
+	if !opts.Overwrite {
+		input.IfNoneMatch = stringPtr("*")
+	}
 	if !a.disableACL {
 		if acl := objectACL(visibility); acl != "" {
 			input.ACL = acl
@@ -385,7 +388,7 @@ func mapError(err error) error {
 		switch apiErr.ErrorCode() {
 		case "NoSuchKey", "NoSuchUpload", "NotFound", "NoSuchBucket", "404":
 			return fmt.Errorf("%w: %s", filesystem.ErrNotFound, apiErr.ErrorCode())
-		case "PreconditionFailed", "ConditionalRequestConflict", "ObjectAlreadyExists", "412":
+		case "PreconditionFailed", "ObjectAlreadyExists", "412":
 			return fmt.Errorf("%w: %s", filesystem.ErrAlreadyExists, apiErr.ErrorCode())
 		}
 	}

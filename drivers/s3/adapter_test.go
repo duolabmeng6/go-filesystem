@@ -251,7 +251,7 @@ func TestCompatibilityOptionsUseRequiredChecksums(t *testing.T) {
 	}
 }
 
-func TestWriteWithoutOverwriteUsesPreflightInsteadOfConditionalPut(t *testing.T) {
+func TestWriteWithoutOverwriteUsesConditionalPut(t *testing.T) {
 	client := newMockClient()
 	adapter, err := New(context.Background(), Config{
 		Bucket:        "bucket",
@@ -269,8 +269,8 @@ func TestWriteWithoutOverwriteUsesPreflightInsteadOfConditionalPut(t *testing.T)
 	if client.lastPut == nil {
 		t.Fatalf("expected put object call")
 	}
-	if client.lastPut.IfNoneMatch != nil {
-		t.Fatalf("S3-compatible writes should not send IfNoneMatch, got %q", *client.lastPut.IfNoneMatch)
+	if client.lastPut.IfNoneMatch == nil || *client.lastPut.IfNoneMatch != "*" {
+		t.Fatalf("expected IfNoneMatch *, got %v", client.lastPut.IfNoneMatch)
 	}
 	if err := adapter.Write(context.Background(), "a.txt", strings.NewReader("bravo"), filesystem.WriteOptions{}); !errors.Is(err, filesystem.ErrAlreadyExists) {
 		t.Fatalf("expected preflight ErrAlreadyExists, got %v", err)
@@ -400,7 +400,7 @@ func TestExplicitVisibilitySetsS3ObjectACL(t *testing.T) {
 	}
 }
 
-func TestMultipartCompleteDoesNotSendConditionalHeader(t *testing.T) {
+func TestMultipartCompleteWithoutOverwriteUsesConditionalHeader(t *testing.T) {
 	client := newMockClient()
 	adapter, err := New(context.Background(), Config{
 		Bucket:        "bucket",
@@ -426,8 +426,8 @@ func TestMultipartCompleteDoesNotSendConditionalHeader(t *testing.T) {
 	if client.lastComplete == nil {
 		t.Fatalf("expected complete multipart call")
 	}
-	if client.lastComplete.IfNoneMatch != nil {
-		t.Fatalf("S3-compatible multipart complete should not send IfNoneMatch, got %q", *client.lastComplete.IfNoneMatch)
+	if client.lastComplete.IfNoneMatch == nil || *client.lastComplete.IfNoneMatch != "*" {
+		t.Fatalf("expected IfNoneMatch *, got %v", client.lastComplete.IfNoneMatch)
 	}
 }
 
