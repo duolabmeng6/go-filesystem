@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/duolabmeng6/go-filesystem"
+	"github.com/duolabmeng6/go-filesystem/filesystemtest"
 )
 
 func TestPathsRejectTraversal(t *testing.T) {
@@ -42,7 +43,8 @@ func TestSMBIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a, err := New(ctx, Config{Host: host, Port: port, Share: os.Getenv("AFILE_SMB_TEST_SHARE"), Username: os.Getenv("AFILE_SMB_TEST_USER"), Password: os.Getenv("AFILE_SMB_TEST_PASSWORD"), Domain: os.Getenv("AFILE_SMB_TEST_DOMAIN")})
+	config := Config{Host: host, Port: port, Share: os.Getenv("AFILE_SMB_TEST_SHARE"), Username: os.Getenv("AFILE_SMB_TEST_USER"), Password: os.Getenv("AFILE_SMB_TEST_PASSWORD"), Domain: os.Getenv("AFILE_SMB_TEST_DOMAIN")}
+	a, err := New(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +94,56 @@ func TestSMBIntegration(t *testing.T) {
 	if err = a.Delete(ctx, dir+"/moved.txt"); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("read only blocks changes", func(t *testing.T) {
+		scoped, err := filesystem.Scoped(filesystem.ReadOnly(a), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disk := filesystem.NewDisk(scoped)
+		if got, err := disk.Get(ctx, "file.txt"); err != nil || string(got) != "second" {
+			t.Fatalf("read: %q %v", got, err)
+		}
+		for name, operation := range map[string]func() error{
+			"write":  func() error { return disk.Put(ctx, "file.txt", []byte("changed")) },
+			"delete": func() error { return disk.Delete(ctx, "file.txt") },
+			"mkdir":  func() error { return disk.MakeDirectory(ctx, "no-write") },
+			"move":   func() error { return disk.Move(ctx, "file.txt", "renamed.txt") },
+		} {
+			if err := operation(); !errors.Is(err, filesystem.ErrReadOnly) {
+				t.Errorf("%s: expected read-only error, got %v", name, err)
+			}
+		}
+		if got, err := a.Open(ctx, filename); err != nil {
+			t.Fatal(err)
+		} else {
+			data, readErr := io.ReadAll(got)
+			_ = got.Close()
+			if readErr != nil || string(data) != "second" {
+				t.Fatalf("read-only operation changed file: %q %v", data, readErr)
+			}
+		}
+	})
+	t.Run("invalid credentials", func(t *testing.T) {
+		bad := config
+		bad.Password += "-invalid"
+		client, err := New(ctx, bad)
+		if err == nil {
+			_ = client.Close()
+			t.Fatal("invalid credentials accepted")
+		}
+	})
+	filesystemtest.RunListContract(t, func(t testing.TB) *filesystem.Disk {
+		t.Helper()
+		prefix := dir + "/contract-" + strings.ReplaceAll(t.Name(), "/", "-")
+		if err := a.MakeDirectory(ctx, prefix, filesystem.DirectoryOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		scoped, err := filesystem.Scoped(a, prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filesystem.NewDisk(scoped)
+	})
 }
 
 func TestPortOption(t *testing.T) {

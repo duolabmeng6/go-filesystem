@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/duolabmeng6/go-filesystem"
+	"github.com/duolabmeng6/go-filesystem/internal/pathorder"
 )
 
 type Adapter struct {
@@ -368,7 +369,7 @@ func (a *Adapter) ListPage(ctx context.Context, p string, o filesystem.ListOptio
 			if path.Dir(v.Path) != dir && !(dir == "" && path.Dir(v.Path) == ".") {
 				return fmt.Errorf("webdav response contains unexpected path")
 			}
-			if v.Path > cursor {
+			if cursor == "" || pathorder.Compare(v.Path, cursor) > 0 {
 				kind := filesystem.EntryFile
 				if v.IsDir {
 					kind = filesystem.EntryDirectory

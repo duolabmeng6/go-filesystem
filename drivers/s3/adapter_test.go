@@ -660,11 +660,13 @@ func (m *mockClient) ListObjectsV2(ctx context.Context, input *awss3.ListObjects
 	output := &awss3.ListObjectsV2Output{}
 	commonPrefixes := map[string]struct{}{}
 	count := 0
+	lastKey := ""
 	for _, key := range keys[start:] {
 		if count >= maxKeys {
-			output.NextContinuationToken = stringPtr(key)
+			output.NextContinuationToken = stringPtr(lastKey)
 			break
 		}
+		lastKey = key
 		if delimiter != "" {
 			rest := strings.TrimPrefix(key, prefix)
 			if idx := strings.Index(rest, delimiter); idx >= 0 {

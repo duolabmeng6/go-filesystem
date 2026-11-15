@@ -154,6 +154,50 @@ func RunListContract(t *testing.T, newDisk func(t testing.TB) *filesystem.Disk) 
 			t.Fatalf("expected next page")
 		}
 	})
+	t.Run("recursive pagination keeps prefix siblings", func(t *testing.T) {
+		disk := newDisk(t)
+		ctx := context.Background()
+		want := []string{"a/file.txt", "a/nested/inner.txt", "a.txt", "a-b.txt", "a0.txt"}
+		for _, p := range want {
+			if err := disk.Put(ctx, p, []byte(p)); err != nil {
+				t.Fatalf("put %s: %v", p, err)
+			}
+		}
+		for _, size := range []int{1, 2, 3} {
+			seen := make(map[string]bool)
+			cursor := ""
+			for pageCount := 0; ; pageCount++ {
+				if pageCount > 20 {
+					t.Fatalf("page size %d: cursor did not advance", size)
+				}
+				page, err := disk.ListPage(ctx, "", filesystem.WithRecursive(true), filesystem.WithPageSize(size), filesystem.WithCursor(cursor))
+				if err != nil {
+					t.Fatalf("page size %d: %v", size, err)
+				}
+				if len(page.Items) > size {
+					t.Fatalf("page size %d exceeded: %d", size, len(page.Items))
+				}
+				for _, entry := range page.Items {
+					if seen[entry.Path] {
+						t.Fatalf("page size %d: duplicate %q", size, entry.Path)
+					}
+					seen[entry.Path] = true
+				}
+				if page.NextCursor == "" {
+					break
+				}
+				if page.NextCursor == cursor {
+					t.Fatalf("page size %d: cursor did not advance", size)
+				}
+				cursor = page.NextCursor
+			}
+			for _, p := range want {
+				if !seen[p] {
+					t.Errorf("page size %d: missing %q, got %v", size, p, seen)
+				}
+			}
+		}
+	})
 }
 
 func RunVisibilityContract(t *testing.T, newDisk func(t testing.TB) *filesystem.Disk) {

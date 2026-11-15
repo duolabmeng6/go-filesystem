@@ -580,11 +580,13 @@ func (m *mockClient) ListObjectsV2(ctx context.Context, request *aliyunoss.ListO
 	result := &aliyunoss.ListObjectsV2Result{}
 	commonPrefixes := map[string]struct{}{}
 	count := 0
+	lastKey := ""
 	for _, key := range keys[start:] {
 		if count >= maxKeys {
-			result.NextContinuationToken = aliyunoss.Ptr(key)
+			result.NextContinuationToken = aliyunoss.Ptr(lastKey)
 			break
 		}
+		lastKey = key
 		if delimiter != "" {
 			rest := strings.TrimPrefix(key, prefix)
 			if idx := strings.Index(rest, delimiter); idx >= 0 {

@@ -10,8 +10,23 @@ import (
 	"testing"
 
 	"github.com/duolabmeng6/go-filesystem"
+	"github.com/duolabmeng6/go-filesystem/filesystemtest"
 	xwebdav "golang.org/x/net/webdav"
 )
+
+func TestRecursivePagination(t *testing.T) {
+	filesystemtest.RunListContract(t, func(t testing.TB) *filesystem.Disk {
+		t.Helper()
+		handler := &xwebdav.Handler{Prefix: "/dav", FileSystem: xwebdav.NewMemFS(), LockSystem: xwebdav.NewMemLS()}
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		adapter, err := NewFactory()(context.Background(), filesystem.DiskConfig{Options: map[string]any{"url": server.URL + "/dav/"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filesystem.NewDisk(adapter)
+	})
+}
 
 func TestAdapterFileOperations(t *testing.T) {
 	handler := &xwebdav.Handler{Prefix: "/dav", FileSystem: xwebdav.NewMemFS(), LockSystem: xwebdav.NewMemLS()}

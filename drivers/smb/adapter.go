@@ -21,6 +21,7 @@ import (
 
 	smb2 "github.com/cloudsoda/go-smb2"
 	"github.com/duolabmeng6/go-filesystem"
+	"github.com/duolabmeng6/go-filesystem/internal/pathorder"
 )
 
 type Config struct {
@@ -442,7 +443,7 @@ func (a *Adapter) ListPage(ctx context.Context, p string, o filesystem.ListOptio
 			if prefix != "" {
 				name = prefix + "/" + name
 			}
-			if cursor == "" || name > cursor {
+			if cursor == "" || pathorder.Compare(name, cursor) > 0 {
 				kind := filesystem.EntryFile
 				if v.IsDir() {
 					kind = filesystem.EntryDirectory

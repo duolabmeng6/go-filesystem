@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/duolabmeng6/go-filesystem"
+	"github.com/duolabmeng6/go-filesystem/internal/pathorder"
 )
 
 const defaultPageSize = 1000
@@ -557,7 +558,7 @@ func (a *Adapter) listRecursive(ctx context.Context, dir string, displayPrefix s
 			return err
 		}
 		entryPath := joinSlash(displayPrefix, filepath.ToSlash(rel))
-		if cursor != "" && entryPath <= cursor {
+		if cursor != "" && pathorder.Compare(entryPath, cursor) <= 0 {
 			return nil
 		}
 		info, err := entry.Info()
@@ -577,7 +578,7 @@ func (a *Adapter) listRecursive(ctx context.Context, dir string, displayPrefix s
 		return nil, err
 	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].Path < items[j].Path
+		return pathorder.Compare(items[i].Path, items[j].Path) < 0
 	})
 	if len(items) > pageSize {
 		items = items[:pageSize+1]
