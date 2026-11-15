@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,10 @@ func (a *Adapter) request(ctx context.Context, method, p string, body io.Reader,
 			return nil, fmt.Errorf("webdav request: HTTP %d", res.StatusCode)
 		}
 	}
+	if !completedResponse(method, res.StatusCode) || method == http.MethodGet && res.Header.Get("Content-Range") != "" {
+		res.Body.Close()
+		return nil, fmt.Errorf("webdav %s: unexpected HTTP %d response", method, res.StatusCode)
+	}
 	if res.StatusCode == http.StatusMultiStatus && method != "PROPFIND" {
 		var result struct {
 			Responses []struct {
@@ -109,7 +114,11 @@ func (a *Adapter) request(ctx context.Context, method, p string, body io.Reader,
 		}
 		for _, item := range result.Responses {
 			fields := strings.Fields(item.Status)
-			if len(fields) < 2 || len(fields[1]) != 3 || fields[1][0] != '2' {
+			if len(fields) < 2 || len(fields[1]) != 3 {
+				return nil, fmt.Errorf("webdav operation partially failed")
+			}
+			status, err := strconv.Atoi(fields[1])
+			if err != nil || status == http.StatusMultiStatus || !completedResponse(method, status) {
 				return nil, fmt.Errorf("webdav operation partially failed")
 			}
 		}
@@ -118,15 +127,32 @@ func (a *Adapter) request(ctx context.Context, method, p string, body io.Reader,
 	return res, nil
 }
 
+// An accepted asynchronous operation does not confirm that a write completed.
+// GET is always a full read: this adapter never sends a Range request.
+func completedResponse(method string, status int) bool {
+	switch method {
+	case http.MethodGet:
+		return status == http.StatusOK || status == http.StatusNonAuthoritativeInfo
+	case "PROPFIND":
+		return status == http.StatusMultiStatus || status == http.StatusOK
+	case http.MethodPut, "MKCOL":
+		return status == http.StatusOK || status == http.StatusCreated || status == http.StatusNonAuthoritativeInfo || status == http.StatusNoContent
+	case http.MethodDelete, "COPY", "MOVE":
+		return status == http.StatusOK || status == http.StatusCreated || status == http.StatusNonAuthoritativeInfo || status == http.StatusNoContent || status == http.StatusMultiStatus
+	default:
+		return false
+	}
+}
+
 type multistatus struct {
 	Responses []struct {
 		Href      string `xml:"href"`
 		Propstats []struct {
 			Status string `xml:"status"`
 			Prop   struct {
-				Size     int64  `xml:"getcontentlength"`
-				Modified string `xml:"getlastmodified"`
-				Resource struct {
+				Size     *string `xml:"getcontentlength"`
+				Modified *string `xml:"getlastmodified"`
+				Resource *struct {
 					Collection *struct{} `xml:"collection"`
 				} `xml:"resourcetype"`
 			} `xml:"prop"`
@@ -165,19 +191,54 @@ func (a *Adapter) propfind(ctx context.Context, p, depth string) ([]filesystem.F
 		if e != nil || norm != name {
 			return nil, filesystem.ErrInvalidPath
 		}
-		found := false
+		var info filesystem.FileInfo
+		info.Path = name
+		foundResource := false
+		foundSize := false
+		foundModified := false
 		for _, ps := range v.Propstats {
-			if !strings.Contains(ps.Status, " 200 ") {
+			fields := strings.Fields(ps.Status)
+			if len(fields) < 2 {
+				return nil, fmt.Errorf("webdav response invalid property status")
+			}
+			status, err := strconv.Atoi(fields[1])
+			if err != nil || status < 100 || status > 599 {
+				return nil, fmt.Errorf("webdav response invalid property status")
+			}
+			// A propstat only supplies usable properties when its representation
+			// is complete; 202 or 206 must not be mistaken for confirmed data.
+			if status != http.StatusOK && status != http.StatusNonAuthoritativeInfo {
+				if status >= 200 && status < 300 {
+					return nil, fmt.Errorf("webdav response incomplete property status: HTTP %d", status)
+				}
 				continue
 			}
-			modified, _ := http.ParseTime(ps.Prop.Modified)
-			items = append(items, filesystem.FileInfo{Path: name, Size: ps.Prop.Size, LastModified: modified, IsDir: ps.Prop.Resource.Collection != nil})
-			found = true
-			break
+			if ps.Prop.Resource != nil {
+				isDir := ps.Prop.Resource.Collection != nil
+				if foundResource && info.IsDir != isDir {
+					return nil, fmt.Errorf("webdav response conflicting resource types")
+				}
+				info.IsDir, foundResource = isDir, true
+			}
+			if ps.Prop.Size != nil {
+				size, err := strconv.ParseInt(strings.TrimSpace(*ps.Prop.Size), 10, 64)
+				if err != nil || size < 0 || foundSize && info.Size != size {
+					return nil, fmt.Errorf("webdav response invalid content length")
+				}
+				info.Size, foundSize = size, true
+			}
+			if ps.Prop.Modified != nil && *ps.Prop.Modified != "" {
+				modified, err := http.ParseTime(*ps.Prop.Modified)
+				if err != nil || foundModified && !info.LastModified.Equal(modified) {
+					return nil, fmt.Errorf("webdav response invalid modification time")
+				}
+				info.LastModified, foundModified = modified, true
+			}
 		}
-		if !found {
-			return nil, fmt.Errorf("webdav response missing properties")
+		if !foundResource {
+			return nil, fmt.Errorf("webdav response missing resource type")
 		}
+		items = append(items, info)
 	}
 	return items, nil
 }
