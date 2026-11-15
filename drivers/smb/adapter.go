@@ -42,6 +42,9 @@ type Adapter struct {
 	closeErr  error
 }
 
+// STATUS_NO_SUCH_FILE is returned by some SMB servers for a missing path.
+const statusNoSuchFile uint32 = 0xC000000F
+
 func NewFactory() filesystem.DriverFactory {
 	return func(ctx context.Context, d filesystem.DiskConfig) (filesystem.Adapter, error) {
 		str := func(k string) string { v, _ := d.Options[k].(string); return v }
@@ -177,7 +180,7 @@ func (a *Adapter) check(ctx context.Context, p string, missing bool) error {
 		}
 		info, e := a.share.WithContext(ctx).Lstat(cur)
 		if e != nil {
-			if missing && errors.Is(e, os.ErrNotExist) {
+			if missing && isNotExist(e) {
 				return nil
 			}
 			return mapError(e)
@@ -188,11 +191,16 @@ func (a *Adapter) check(ctx context.Context, p string, missing bool) error {
 	}
 	return nil
 }
+func isNotExist(err error) bool {
+	var response *smb2.ResponseError
+	return errors.Is(err, os.ErrNotExist) || (errors.As(err, &response) && response != nil && response.Code == statusNoSuchFile)
+}
+
 func mapError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if isNotExist(err) {
 		return filesystem.ErrNotFound
 	}
 	if errors.Is(err, os.ErrExist) {
@@ -280,7 +288,7 @@ func (a *Adapter) Write(ctx context.Context, p string, r io.Reader, o filesystem
 	if !o.Overwrite {
 		if _, e = share.Lstat(t); e == nil {
 			return filesystem.ErrAlreadyExists
-		} else if !errors.Is(e, os.ErrNotExist) {
+		} else if !isNotExist(e) {
 			return mapError(e)
 		}
 	}

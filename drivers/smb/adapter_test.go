@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	smb2 "github.com/cloudsoda/go-smb2"
 	"github.com/duolabmeng6/go-filesystem"
 	"github.com/duolabmeng6/go-filesystem/filesystemtest"
 )
@@ -25,6 +26,20 @@ func TestPathsRejectTraversal(t *testing.T) {
 	}
 	if got, err := a.target("docs/file.md"); err != nil || got != "projects/docs/file.md" {
 		t.Fatalf("unexpected target %q: %v", got, err)
+	}
+}
+
+func TestMissingSMBStatusMapping(t *testing.T) {
+	missing := &os.PathError{Op: "lstat", Path: "missing", Err: &smb2.ResponseError{Code: statusNoSuchFile}}
+	if !isNotExist(missing) || !errors.Is(mapError(missing), filesystem.ErrNotFound) {
+		t.Fatal("wrapped STATUS_NO_SUCH_FILE must be treated as missing")
+	}
+	if !isNotExist(os.ErrNotExist) || !errors.Is(mapError(os.ErrNotExist), filesystem.ErrNotFound) {
+		t.Fatal("ordinary missing errors must remain supported")
+	}
+	other := &smb2.ResponseError{Code: 0xC0000022} // STATUS_ACCESS_DENIED
+	if isNotExist(other) || mapError(other) != other {
+		t.Fatal("other SMB errors must not be treated as missing")
 	}
 }
 
@@ -54,6 +69,12 @@ func TestSMBIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.DeleteDirectory(context.Background(), dir)
+	if exists, err := a.Exists(ctx, dir+"/missing.txt"); err != nil || exists {
+		t.Fatalf("missing path exists: %v %v", exists, err)
+	}
+	if _, err := a.Stat(ctx, dir+"/missing.txt"); !errors.Is(err, filesystem.ErrNotFound) {
+		t.Fatalf("missing path stat: %v", err)
+	}
 	filename := dir + "/file.txt"
 	if err = a.Write(ctx, filename, strings.NewReader("first"), filesystem.DefaultWriteOptions()); err != nil {
 		t.Fatal(err)
