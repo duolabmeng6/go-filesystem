@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/duolabmeng6/go-filesystem"
@@ -83,6 +84,7 @@ func (a *Adapter) ListMultipartUploadParts(ctx context.Context, path string, upl
 	}
 	parts := make([]filesystem.MultipartUploadPart, 0)
 	var marker int32
+	seen := make(map[int32]struct{})
 	for {
 		result, err := a.client.ListParts(ctx, &aliyunoss.ListPartsRequest{
 			Bucket:           aliyunoss.Ptr(a.bucket),
@@ -94,15 +96,35 @@ func (a *Adapter) ListMultipartUploadParts(ctx context.Context, path string, upl
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if result == nil {
+			return nil, fmt.Errorf("oss list parts: missing response")
+		}
+		pageMax := marker
 		for _, part := range result.Parts {
+			if part.PartNumber < 1 || part.PartNumber > ossMultipartMaxParts || part.Size < 0 || part.ETag == nil || strings.TrimSpace(*part.ETag) == "" {
+				return nil, fmt.Errorf("oss list parts: invalid or missing part metadata")
+			}
+			if _, exists := seen[part.PartNumber]; exists {
+				return nil, fmt.Errorf("oss list parts: duplicate part number %d", part.PartNumber)
+			}
+			if part.PartNumber <= marker {
+				return nil, fmt.Errorf("oss list parts: part number does not advance past marker")
+			}
+			seen[part.PartNumber] = struct{}{}
+			if part.PartNumber > pageMax {
+				pageMax = part.PartNumber
+			}
 			parts = append(parts, filesystem.MultipartUploadPart{
 				PartNumber: int(part.PartNumber),
 				ETag:       aliyunoss.ToString(part.ETag),
 				Size:       part.Size,
 			})
 		}
-		if !result.IsTruncated || result.NextPartNumberMarker == 0 {
+		if !result.IsTruncated {
 			break
+		}
+		if result.NextPartNumberMarker <= marker || result.NextPartNumberMarker > ossMultipartMaxParts || result.NextPartNumberMarker != pageMax {
+			return nil, fmt.Errorf("oss list parts: invalid next part marker")
 		}
 		marker = result.NextPartNumberMarker
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,8 @@ type multipartPartMetadata struct {
 	PartNumber int    `json:"part_number"`
 	ETag       string `json:"etag"`
 	Size       int64  `json:"size"`
+	DataFile   string `json:"data_file,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
 }
 
 func (a *Adapter) CreateMultipartUpload(ctx context.Context, path string, opts filesystem.WriteOptions) (filesystem.MultipartUpload, error) {
@@ -85,10 +88,32 @@ func (a *Adapter) UploadPart(ctx context.Context, path string, uploadID string, 
 	if err := ctx.Err(); err != nil {
 		return filesystem.MultipartUploadPart{}, err
 	}
+	lock, err := a.lockMultipartSession(ctx, uploadID, false)
+	if err != nil {
+		return filesystem.MultipartUploadPart{}, err
+	}
+	defer lock.Close()
 	if _, err := a.readMultipartMetadata(path, uploadID); err != nil {
 		return filesystem.MultipartUploadPart{}, err
 	}
-	partPath := a.multipartPartPath(uploadID, partNumber)
+	if partNumber < 1 || partNumber > localMultipartMaxParts {
+		return filesystem.MultipartUploadPart{}, fmt.Errorf("%w: invalid part number", filesystem.ErrInvalidPath)
+	}
+	partLock, err := a.lockMultipartPart(ctx, uploadID, partNumber)
+	if err != nil {
+		return filesystem.MultipartUploadPart{}, err
+	}
+	defer partLock.Close()
+	var oldMeta multipartPartMetadata
+	var oldPath string
+	if err := readJSON(a.multipartPartMetaPath(uploadID, partNumber), &oldMeta); err == nil {
+		oldPath, err = a.multipartDataPath(uploadID, partNumber, oldMeta.DataFile)
+		if err != nil || oldMeta.PartNumber != partNumber {
+			return filesystem.MultipartUploadPart{}, fmt.Errorf("%w: invalid multipart part metadata", filesystem.ErrInvalidPath)
+		}
+	} else if !errors.Is(err, filesystem.ErrNotFound) {
+		return filesystem.MultipartUploadPart{}, err
+	}
 	temp, err := os.CreateTemp(a.multipartDir(uploadID), fmt.Sprintf("part-%06d-", partNumber))
 	if err != nil {
 		return filesystem.MultipartUploadPart{}, mapLocalError(err)
@@ -101,7 +126,8 @@ func (a *Adapter) UploadPart(ctx context.Context, path string, uploadID string, 
 		}
 	}()
 	hash := md5.New()
-	written, err := copyWithContext(ctx, io.MultiWriter(temp, hash), r)
+	contentHash := sha256.New()
+	written, err := copyWithContext(ctx, io.MultiWriter(temp, hash, contentHash), r)
 	if closeErr := temp.Close(); err == nil {
 		err = closeErr
 	}
@@ -111,18 +137,25 @@ func (a *Adapter) UploadPart(ctx context.Context, path string, uploadID string, 
 	if size >= 0 && written != size {
 		return filesystem.MultipartUploadPart{}, fmt.Errorf("%w: part size mismatch", filesystem.ErrInvalidPath)
 	}
-	if err := os.Rename(tempName, partPath); err != nil {
-		return filesystem.MultipartUploadPart{}, mapLocalError(err)
+	if err := ctx.Err(); err != nil {
+		return filesystem.MultipartUploadPart{}, err
 	}
-	cleanup = false
 	part := filesystem.MultipartUploadPart{
 		PartNumber: partNumber,
 		ETag:       hex.EncodeToString(hash.Sum(nil)),
 		Size:       written,
 	}
-	partMeta := multipartPartMetadata(part)
-	if err := writeJSON(a.multipartPartMetaPath(uploadID, partNumber), partMeta); err != nil {
+	// Each published manifest points at an immutable file. Replacing a part is
+	// therefore one atomic manifest rename, including across processes.
+	partMeta := multipartPartMetadata{PartNumber: part.PartNumber, ETag: part.ETag, Size: part.Size, DataFile: filepath.Base(tempName), SHA256: hex.EncodeToString(contentHash.Sum(nil))}
+	if err := writeJSONAtomic(a.multipartPartMetaPath(uploadID, partNumber), partMeta); err != nil {
 		return filesystem.MultipartUploadPart{}, err
+	}
+	cleanup = false
+	if oldPath != "" {
+		if err := os.Remove(oldPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return part, fmt.Errorf("%w: part uploaded but previous version cleanup failed: %w", filesystem.ErrPartialFailure, err)
+		}
 	}
 	return part, nil
 }
@@ -131,6 +164,15 @@ func (a *Adapter) ListMultipartUploadParts(ctx context.Context, path string, upl
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	lock, err := a.lockMultipartSession(ctx, uploadID, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	return a.listMultipartUploadParts(ctx, path, uploadID)
+}
+
+func (a *Adapter) listMultipartUploadParts(ctx context.Context, path string, uploadID string) ([]filesystem.MultipartUploadPart, error) {
 	if _, err := a.readMultipartMetadata(path, uploadID); err != nil {
 		return nil, err
 	}
@@ -147,7 +189,7 @@ func (a *Adapter) ListMultipartUploadParts(ctx context.Context, path string, upl
 		if err := readJSON(filepath.Join(a.multipartDir(uploadID), entry.Name()), &meta); err != nil {
 			return nil, err
 		}
-		parts = append(parts, filesystem.MultipartUploadPart(meta))
+		parts = append(parts, filesystem.MultipartUploadPart{PartNumber: meta.PartNumber, ETag: meta.ETag, Size: meta.Size})
 	}
 	sort.Slice(parts, func(i, j int) bool {
 		return parts[i].PartNumber < parts[j].PartNumber
@@ -159,12 +201,17 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	lock, err := a.lockMultipartSession(ctx, uploadID, true)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if _, err := a.readMultipartMetadata(path, uploadID); err != nil {
 		return err
 	}
 	if len(parts) == 0 {
 		var err error
-		parts, err = a.ListMultipartUploadParts(ctx, path, uploadID)
+		parts, err = a.listMultipartUploadParts(ctx, path, uploadID)
 		if err != nil {
 			return err
 		}
@@ -175,20 +222,38 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 	sort.Slice(parts, func(i, j int) bool {
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
+	metas := make([]multipartPartMetadata, 0, len(parts))
+	for i, part := range parts {
+		if part.PartNumber < 1 || part.PartNumber > localMultipartMaxParts || (i > 0 && parts[i-1].PartNumber == part.PartNumber) {
+			return fmt.Errorf("%w: invalid or duplicate part number", filesystem.ErrInvalidPath)
+		}
+		var meta multipartPartMetadata
+		if err := readJSON(a.multipartPartMetaPath(uploadID, part.PartNumber), &meta); err != nil {
+			return err
+		}
+		if meta.PartNumber != part.PartNumber || meta.Size < 0 || meta.ETag == "" || (part.ETag != "" && part.ETag != meta.ETag) || (part.Size != 0 && part.Size != meta.Size) {
+			return fmt.Errorf("%w: multipart part metadata mismatch", filesystem.ErrInvalidPath)
+		}
+		if _, err := a.multipartDataPath(uploadID, part.PartNumber, meta.DataFile); err != nil {
+			return err
+		}
+		metas = append(metas, meta)
+	}
 	pr, pw := io.Pipe()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		var pipeErr error
-		for _, part := range parts {
-			if part.PartNumber < 1 || part.PartNumber > localMultipartMaxParts {
-				pipeErr = fmt.Errorf("%w: invalid part number", filesystem.ErrInvalidPath)
-				break
-			}
-			file, err := os.Open(a.multipartPartPath(uploadID, part.PartNumber))
+		for _, meta := range metas {
+			partPath, _ := a.multipartDataPath(uploadID, meta.PartNumber, meta.DataFile)
+			file, err := os.Open(partPath)
 			if err != nil {
 				pipeErr = mapLocalError(err)
 				break
 			}
-			_, copyErr := copyWithContext(ctx, pw, file)
+			hash := md5.New()
+			contentHash := sha256.New()
+			written, copyErr := copyWithContext(ctx, io.MultiWriter(pw, hash, contentHash), file)
 			closeErr := file.Close()
 			if copyErr != nil {
 				pipeErr = copyErr
@@ -198,11 +263,16 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 				pipeErr = mapLocalError(closeErr)
 				break
 			}
+			if written != meta.Size || hex.EncodeToString(hash.Sum(nil)) != meta.ETag || (meta.SHA256 != "" && hex.EncodeToString(contentHash.Sum(nil)) != meta.SHA256) {
+				pipeErr = fmt.Errorf("%w: multipart part content mismatch", filesystem.ErrInvalidPath)
+				break
+			}
 		}
 		_ = pw.CloseWithError(pipeErr)
 	}()
 	writeErr := a.Write(ctx, path, pr, opts)
 	closeErr := pr.Close()
+	<-done
 	if writeErr != nil {
 		return writeErr
 	}
@@ -216,6 +286,11 @@ func (a *Adapter) AbortMultipartUpload(ctx context.Context, path string, uploadI
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	lock, err := a.lockMultipartSession(ctx, uploadID, true)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if _, err := a.readMultipartMetadata(path, uploadID); err != nil {
 		return err
 	}
@@ -249,6 +324,16 @@ func (a *Adapter) multipartPartMetaPath(uploadID string, partNumber int) string 
 	return filepath.Join(a.multipartDir(uploadID), fmt.Sprintf("part-%06d.json", partNumber))
 }
 
+func (a *Adapter) multipartDataPath(uploadID string, partNumber int, dataFile string) (string, error) {
+	if dataFile == "" {
+		return a.multipartPartPath(uploadID, partNumber), nil
+	}
+	if filepath.Base(dataFile) != dataFile || !strings.HasPrefix(dataFile, fmt.Sprintf("part-%06d-", partNumber)) {
+		return "", fmt.Errorf("%w: invalid multipart part data file", filesystem.ErrInvalidPath)
+	}
+	return filepath.Join(a.multipartDir(uploadID), dataFile), nil
+}
+
 func randomUploadID() (string, error) {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {
@@ -263,6 +348,26 @@ func writeJSON(path string, value any) error {
 		return err
 	}
 	return mapLocalError(os.WriteFile(path, data, 0o600))
+}
+
+func writeJSONAtomic(path string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".part-meta-*")
+	if err != nil {
+		return mapLocalError(err)
+	}
+	defer os.Remove(temp.Name())
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return mapLocalError(err)
+	}
+	if err := temp.Close(); err != nil {
+		return mapLocalError(err)
+	}
+	return mapLocalError(os.Rename(temp.Name(), path))
 }
 
 func readJSON(path string, value any) error {

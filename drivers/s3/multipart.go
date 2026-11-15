@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"strings"
 
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -99,6 +101,8 @@ func (a *Adapter) ListMultipartUploadParts(ctx context.Context, path string, upl
 	}
 	parts := make([]filesystem.MultipartUploadPart, 0)
 	var marker *string
+	previousMarker := 0
+	seen := make(map[int]struct{})
 	for {
 		output, err := a.client.ListParts(ctx, &awss3.ListPartsInput{
 			Bucket:           &a.bucket,
@@ -110,28 +114,43 @@ func (a *Adapter) ListMultipartUploadParts(ctx context.Context, path string, upl
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if output == nil || output.IsTruncated == nil {
+			return nil, fmt.Errorf("s3 list parts: missing pagination status")
+		}
+		pageMax := previousMarker
 		for _, part := range output.Parts {
-			partNumber := 0
-			if part.PartNumber != nil {
-				partNumber = int(*part.PartNumber)
+			if part.PartNumber == nil || *part.PartNumber < 1 || *part.PartNumber > s3MultipartMaxParts || part.Size == nil || *part.Size < 0 || part.ETag == nil || strings.TrimSpace(*part.ETag) == "" {
+				return nil, fmt.Errorf("s3 list parts: invalid or missing part metadata")
 			}
-			size := int64(0)
-			if part.Size != nil {
-				size = *part.Size
+			partNumber := int(*part.PartNumber)
+			if partNumber <= previousMarker {
+				return nil, fmt.Errorf("s3 list parts: part number does not advance past marker")
+			}
+			if _, exists := seen[partNumber]; exists {
+				return nil, fmt.Errorf("s3 list parts: duplicate part number %d", partNumber)
+			}
+			seen[partNumber] = struct{}{}
+			if partNumber > pageMax {
+				pageMax = partNumber
 			}
 			parts = append(parts, filesystem.MultipartUploadPart{
 				PartNumber: partNumber,
-				ETag:       awsString(part.ETag),
-				Size:       size,
+				ETag:       *part.ETag,
+				Size:       *part.Size,
 			})
 		}
-		if output.IsTruncated == nil || !*output.IsTruncated {
+		if !*output.IsTruncated {
 			break
 		}
+		if output.NextPartNumberMarker == nil {
+			return nil, fmt.Errorf("s3 list parts: missing next part marker")
+		}
+		nextMarker, err := strconv.Atoi(*output.NextPartNumberMarker)
+		if err != nil || nextMarker <= previousMarker || nextMarker > s3MultipartMaxParts || nextMarker != pageMax {
+			return nil, fmt.Errorf("s3 list parts: invalid next part marker")
+		}
+		previousMarker = nextMarker
 		marker = output.NextPartNumberMarker
-		if marker == nil || *marker == "" {
-			break
-		}
 	}
 	sort.Slice(parts, func(i, j int) bool {
 		return parts[i].PartNumber < parts[j].PartNumber

@@ -61,8 +61,10 @@ func New(config Config) (*Adapter, error) {
 		filesystem.CapabilityMove,
 		filesystem.CapabilityDirectory,
 		filesystem.CapabilityVisibility,
-		filesystem.CapabilityMultipart,
 	)
+	if multipartLockSupported {
+		caps[filesystem.CapabilityMultipart] = struct{}{}
+	}
 	if config.BaseURL != "" {
 		caps[filesystem.CapabilityURL] = struct{}{}
 	}
