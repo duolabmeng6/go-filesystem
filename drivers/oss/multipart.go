@@ -23,6 +23,11 @@ func (a *Adapter) CreateMultipartUpload(ctx context.Context, path string, opts f
 	if !opts.Visibility.Valid() {
 		return filesystem.MultipartUpload{}, filesystem.ErrInvalidVisibility
 	}
+	if !opts.Overwrite {
+		if err := a.checkTargetAbsent(ctx, path); err != nil {
+			return filesystem.MultipartUpload{}, err
+		}
+	}
 	request := &aliyunoss.InitiateMultipartUploadRequest{
 		Bucket: aliyunoss.Ptr(a.bucket),
 		Key:    aliyunoss.Ptr(path),
@@ -116,6 +121,11 @@ func (a *Adapter) CompleteMultipartUpload(ctx context.Context, path string, uplo
 	}
 	if len(parts) == 0 {
 		return fmt.Errorf("%w: no uploaded parts", filesystem.ErrInvalidPath)
+	}
+	if !opts.Overwrite {
+		if err := a.checkTargetAbsent(ctx, path); err != nil {
+			return err
+		}
 	}
 	sort.Slice(parts, func(i, j int) bool {
 		return parts[i].PartNumber < parts[j].PartNumber

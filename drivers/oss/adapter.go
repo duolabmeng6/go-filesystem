@@ -39,6 +39,11 @@ func (a *Adapter) Write(ctx context.Context, path string, r io.Reader, opts file
 	if !opts.Visibility.Valid() {
 		return filesystem.ErrInvalidVisibility
 	}
+	if !opts.Overwrite {
+		if err := a.checkTargetAbsent(ctx, path); err != nil {
+			return err
+		}
+	}
 	request := &aliyunoss.PutObjectRequest{
 		Bucket: aliyunoss.Ptr(a.bucket),
 		Key:    aliyunoss.Ptr(path),
@@ -151,6 +156,17 @@ func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (a *Adapter) checkTargetAbsent(ctx context.Context, path string) error {
+	exists, err := a.Exists(ctx, path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return filesystem.ErrAlreadyExists
+	}
+	return nil
 }
 
 func (a *Adapter) Stat(ctx context.Context, path string) (filesystem.FileInfo, error) {
