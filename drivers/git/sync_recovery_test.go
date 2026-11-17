@@ -19,6 +19,24 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 )
 
+func setRepositoryOriginForSyncTest(t *testing.T, repo *gogit.Repository, remoteURL string) {
+	t.Helper()
+	config, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Remotes[defaultRemoteName].URLs = []string{remoteURL}
+	if err := repo.SetConfig(config); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setBlockingRemoteForSyncTest(t *testing.T, adapter *Adapter, remoteURL string) {
+	t.Helper()
+	setRepositoryOriginForSyncTest(t, adapter.repo, remoteURL)
+	adapter.config.URL = remoteURL
+}
+
 func TestSyncFailedPullRestoresLocalChanges(t *testing.T) {
 	remote := seedBareRepository(t)
 	root := t.TempDir()
@@ -53,7 +71,7 @@ func TestSyncFailedPullRestoresLocalChanges(t *testing.T) {
 func TestSyncCancellationPreservesConcurrentEditAndBackup(t *testing.T) {
 	remote := seedBareRepository(t)
 	root := t.TempDir()
-	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
+	adapter, err := New(context.Background(), Config{URL: remote, Root: root, Branch: "master"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +88,7 @@ func TestSyncCancellationPreservesConcurrentEditAndBackup(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer server.Close()
-	adapter.config.URL = server.URL
+	setBlockingRemoteForSyncTest(t, adapter, server.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -576,14 +594,14 @@ func TestSyncBackupRejectsWorktreeGitFileBeforeCleanup(t *testing.T) {
 func TestSyncCrashLeavesDiscoverableBackup(t *testing.T) {
 	if os.Getenv("GOFILESYSTEM_SYNC_CRASH_HELPER") == "1" {
 		root := os.Getenv("GOFILESYSTEM_SYNC_CRASH_ROOT")
-		adapter, err := New(context.Background(), Config{URL: os.Getenv("GOFILESYSTEM_SYNC_CRASH_REMOTE"), Root: root})
+		adapter, err := New(context.Background(), Config{URL: os.Getenv("GOFILESYSTEM_SYNC_CRASH_REMOTE"), Root: root, Branch: "master"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(root, "docs/a.txt"), []byte("crash local edit"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		adapter.config.URL = os.Getenv("GOFILESYSTEM_SYNC_CRASH_BLOCKING_REMOTE")
+		setBlockingRemoteForSyncTest(t, adapter, os.Getenv("GOFILESYSTEM_SYNC_CRASH_BLOCKING_REMOTE"))
 		_ = adapter.Sync(context.Background(), "sync")
 		t.Fatal("blocking pull unexpectedly returned")
 	}
@@ -618,6 +636,11 @@ func TestSyncCrashLeavesDiscoverableBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
+	repo, err := gogit.PlainOpen(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setRepositoryOriginForSyncTest(t, repo, remote)
 	adapter, err := New(context.Background(), Config{URL: remote, Root: root})
 	if err != nil {
 		t.Fatal(err)

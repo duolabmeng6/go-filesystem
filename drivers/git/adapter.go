@@ -31,6 +31,8 @@ type Adapter struct {
 	repo         *gogit.Repository
 	worktree     *gogit.Worktree
 	files        *local.Adapter
+	rootIdentity os.FileInfo
+	gitIdentity  os.FileInfo
 	capabilities filesystem.CapabilitySet
 }
 
@@ -84,11 +86,21 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
+	rootIdentity, err := os.Stat(files.Root())
+	if err != nil {
+		return nil, fmt.Errorf("%w: 无法检查 Git 工作区", filesystem.ErrInvalidPath)
+	}
+	gitIdentity, err := os.Stat(filepath.Join(files.Root(), ".git"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: 无法检查 Git 仓库", filesystem.ErrInvalidPath)
+	}
 	adapter := &Adapter{
-		config:   config,
-		repo:     repo,
-		worktree: worktree,
-		files:    files,
+		config:       config,
+		repo:         repo,
+		worktree:     worktree,
+		files:        files,
+		rootIdentity: rootIdentity,
+		gitIdentity:  gitIdentity,
 		capabilities: filesystem.NewCapabilitySet(
 			filesystem.CapabilityCopy,
 			filesystem.CapabilityMove,
@@ -425,6 +437,14 @@ func (a *Adapter) Pull(ctx context.Context) error {
 }
 
 func (a *Adapter) pullLocked(ctx context.Context) error {
+	branch, err := a.remoteBranch(ctx)
+	if err != nil {
+		return err
+	}
+	return a.pullBranchLocked(ctx, branch)
+}
+
+func (a *Adapter) pullBranchLocked(ctx context.Context, branch plumbing.ReferenceName) error {
 	auth, err := a.config.authMethod()
 	if err != nil {
 		return err
@@ -432,8 +452,8 @@ func (a *Adapter) pullLocked(ctx context.Context) error {
 	err = a.worktree.PullContext(ctx, &gogit.PullOptions{
 		RemoteName:    defaultRemoteName,
 		RemoteURL:     a.config.URL,
-		ReferenceName: branchReferenceName(a.config.Branch),
-		SingleBranch:  a.config.Branch != "",
+		ReferenceName: branch,
+		SingleBranch:  true,
 		Auth:          auth,
 	})
 	if err == nil || errors.Is(err, gogit.NoErrAlreadyUpToDate) {
@@ -457,6 +477,9 @@ func (a *Adapter) Commit(ctx context.Context, message string) (string, error) {
 	defer a.gitMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.validateRepositoryBinding(); err != nil {
+		return "", err
+	}
 	return a.commitLocked(message)
 }
 
@@ -502,23 +525,38 @@ func (a *Adapter) Push(ctx context.Context) error {
 }
 
 func (a *Adapter) pushLocked(ctx context.Context) error {
+	branch, err := a.remoteBranch(ctx)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	hash, err := a.branchCommitLocked(branch)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return a.pushCommit(ctx, branch, hash)
+}
+
+func (a *Adapter) pushCommit(ctx context.Context, branch plumbing.ReferenceName, hash plumbing.Hash) error {
+	actualBranch, err := a.remoteBranch(ctx)
+	if err != nil {
+		return err
+	}
+	if actualBranch != branch {
+		return fmt.Errorf("%w: %w: Git 当前分支发生变化，请检查工作区", filesystem.ErrInvalidPath, ErrBranchMismatch)
+	}
 	auth, err := a.config.authMethod()
 	if err != nil {
 		return err
 	}
-	refSpec := gitconfig.RefSpec("")
-	if a.config.Branch != "" {
-		name := branchReferenceName(a.config.Branch)
-		refSpec = gitconfig.RefSpec(fmt.Sprintf("%s:%s", name, name))
-	}
+	refSpec := gitconfig.RefSpec(fmt.Sprintf("%s:%s", hash, branch))
 	options := &gogit.PushOptions{
 		RemoteName: defaultRemoteName,
 		RemoteURL:  a.config.URL,
 		Auth:       auth,
 	}
-	if refSpec != "" {
-		options.RefSpecs = []gitconfig.RefSpec{refSpec}
-	}
+	options.RefSpecs = []gitconfig.RefSpec{refSpec}
 	err = a.repo.PushContext(ctx, options)
 	if err == nil || errors.Is(err, gogit.NoErrAlreadyUpToDate) {
 		return nil
@@ -539,6 +577,11 @@ func (a *Adapter) Sync(ctx context.Context, message string) error {
 	a.mu.Lock()
 
 	if err := a.checkPendingSyncBackupsLocked(); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	branch, err := a.remoteBranch(ctx)
+	if err != nil {
 		a.mu.Unlock()
 		return err
 	}
@@ -565,7 +608,7 @@ func (a *Adapter) Sync(ctx context.Context, message string) error {
 			return err
 		}
 	}
-	if err := a.pullLocked(ctx); err != nil {
+	if err := a.pullBranchLocked(ctx, branch); err != nil {
 		if len(snapshots) > 0 {
 			err = a.rollbackSnapshotsLocked(snapshots, backupPath, err)
 		}
@@ -590,8 +633,13 @@ func (a *Adapter) Sync(ctx context.Context, message string) error {
 		a.mu.Unlock()
 		return err
 	}
+	hash, err := a.branchCommitLocked(branch)
+	if err != nil {
+		a.mu.Unlock()
+		return err
+	}
 	a.mu.Unlock()
-	return a.pushLocked(ctx)
+	return a.pushCommit(ctx, branch, hash)
 }
 
 // Never start another destructive sync while an earlier snapshot may need recovery.
@@ -844,7 +892,14 @@ func ensureRepository(ctx context.Context, config Config) (*gogit.Repository, er
 	}
 	gitDir := filepath.Join(config.Root, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
-		return gogit.PlainOpen(config.Root)
+		repo, err := gogit.PlainOpen(config.Root)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateRepositoryBinding(repo, config); err != nil {
+			return nil, err
+		}
+		return repo, nil
 	}
 	if err := ensureCloneTarget(config.Root); err != nil {
 		return nil, err
