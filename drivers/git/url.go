@@ -10,7 +10,11 @@ import (
 	"github.com/duolabmeng6/go-filesystem"
 )
 
-var scpLikeURLPattern = regexp.MustCompile(`^([^@]+)@([^:]+):(.+)$`)
+var (
+	scpLikeURLPattern     = regexp.MustCompile(`^([^@/]+)@(\[[^]]+\]|[^:/]+):(.+)$`)
+	ipv6SCPLikeURLPattern = regexp.MustCompile(`^(?:[^@/]+@)?\[[^]]+\]:.+$`)
+	urlSchemePattern      = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+)
 
 type URLInfo struct {
 	Raw            string `json:"raw"`
@@ -27,8 +31,13 @@ func ParseURL(raw string) (URLInfo, error) {
 	if raw == "" {
 		return URLInfo{}, fmt.Errorf("%w: git url is required", filesystem.ErrInvalidPath)
 	}
-	if match := scpLikeURLPattern.FindStringSubmatch(raw); match != nil {
-		return urlInfoFromParts(raw, "ssh", match[2], match[1], match[3])
+	if err := validateGitURLCompatibility(raw); err != nil {
+		return URLInfo{}, err
+	}
+	if !urlSchemePattern.MatchString(raw) {
+		if match := scpLikeURLPattern.FindStringSubmatch(raw); match != nil {
+			return urlInfoFromParts(raw, "ssh", match[2], match[1], match[3])
+		}
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -44,6 +53,17 @@ func ParseURL(raw string) (URLInfo, error) {
 	default:
 		return URLInfo{}, fmt.Errorf("%w: git url protocol is unsupported", filesystem.ErrInvalidPath)
 	}
+}
+
+func ipv6SCPLikeURLError() error {
+	return fmt.Errorf("%w: IPv6 地址请使用 ssh://git@[IPv6]/path 格式", filesystem.ErrInvalidPath)
+}
+
+func validateGitURLCompatibility(raw string) error {
+	if !urlSchemePattern.MatchString(raw) && ipv6SCPLikeURLPattern.MatchString(raw) {
+		return ipv6SCPLikeURLError()
+	}
+	return nil
 }
 
 func urlInfoFromParts(raw string, protocol string, host string, user string, repoPath string) (URLInfo, error) {

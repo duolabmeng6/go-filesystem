@@ -50,7 +50,7 @@ func NewFactory() filesystem.DriverFactory {
 			ReadOnly:             config.ReadOnly || boolOption(config.Options, "read_only"),
 			AuthMode:             stringOption(config.Options, "auth_mode"),
 			Username:             stringOption(config.Options, "username"),
-			Password:             firstNonEmpty(stringOption(config.Options, "password"), stringOption(config.Options, "token")),
+			Password:             firstSecret(stringOption(config.Options, "password"), stringOption(config.Options, "token")),
 			PrivateKey:           stringOption(config.Options, "private_key"),
 			PrivateKeyPassphrase: stringOption(config.Options, "private_key_passphrase"),
 			StrictHostKey:        boolOption(config.Options, "strict_host_key"),
@@ -79,7 +79,6 @@ func (c Config) withDefaults() (Config, error) {
 	c.Root = strings.TrimSpace(c.Root)
 	c.AuthMode = normalizeAuthMode(c.AuthMode, c.PrivateKey, c.Password)
 	c.Username = strings.TrimSpace(c.Username)
-	c.Password = strings.TrimSpace(c.Password)
 	c.PrivateKey = strings.TrimSpace(c.PrivateKey)
 	c.CommitName = strings.TrimSpace(c.CommitName)
 	c.CommitEmail = strings.TrimSpace(c.CommitEmail)
@@ -94,6 +93,9 @@ func (c Config) withDefaults() (Config, error) {
 	}
 	if c.URL == "" {
 		return c, fmt.Errorf("%w: git url is required", filesystem.ErrInvalidPath)
+	}
+	if err := validateGitURLCompatibility(c.URL); err != nil {
+		return c, err
 	}
 	if c.Root == "" {
 		return c, fmt.Errorf("%w: git cache root is required", filesystem.ErrInvalidPath)
@@ -119,7 +121,7 @@ func normalizeAuthMode(mode string, privateKey string, password string) string {
 		if strings.TrimSpace(privateKey) != "" {
 			return AuthModePrivateKey
 		}
-		if strings.TrimSpace(password) != "" {
+		if password != "" {
 			return AuthModePassword
 		}
 		return AuthModeNone
@@ -212,6 +214,15 @@ func boolOptionDefault(options map[string]any, key string, fallback bool) bool {
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstSecret(values ...string) string {
+	for _, value := range values {
+		if value != "" {
 			return value
 		}
 	}

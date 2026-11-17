@@ -47,9 +47,7 @@ func TestConnection(ctx context.Context, config Config) (ConnectionTestResult, e
 	config.Branch = strings.TrimSpace(config.Branch)
 	config.AuthMode = normalizeAuthMode(config.AuthMode, config.PrivateKey, config.Password)
 	config.Username = strings.TrimSpace(config.Username)
-	config.Password = strings.TrimSpace(config.Password)
 	config.PrivateKey = strings.TrimSpace(config.PrivateKey)
-	config.PrivateKeyPassphrase = strings.TrimSpace(config.PrivateKeyPassphrase)
 	auth, err := config.authMethod()
 	if err != nil {
 		return ConnectionTestResult{}, err
