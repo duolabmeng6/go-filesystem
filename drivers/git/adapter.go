@@ -574,72 +574,73 @@ func (a *Adapter) Sync(ctx context.Context, message string) error {
 	message = strings.TrimSpace(message)
 	a.gitMu.Lock()
 	defer a.gitMu.Unlock()
+	branch, hash, err := a.prepareSyncLocked(ctx, message)
+	if err != nil {
+		return err
+	}
+	return a.pushCommit(ctx, branch, hash)
+}
+
+// prepareSyncLocked holds gitMu and preserves the worktree's existing
+// snapshot/pull/restore sequence. Its result is a fixed local commit.
+func (a *Adapter) prepareSyncLocked(ctx context.Context, message string) (plumbing.ReferenceName, plumbing.Hash, error) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	if err := a.checkPendingSyncBackupsLocked(); err != nil {
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, err
 	}
 	branch, err := a.remoteBranch(ctx)
 	if err != nil {
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, err
 	}
 	snapshots, err := a.snapshotDirtyLocked()
 	if err != nil {
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, err
 	}
 	backupPath := ""
 	if len(snapshots) > 0 {
 		backupPath, err = a.saveSnapshotsLocked(snapshots)
 		if err != nil {
-			a.mu.Unlock()
-			return err
+			return "", plumbing.ZeroHash, err
 		}
 		if err := ctx.Err(); err != nil {
 			cleanupErr := removeSyncBackup(backupPath)
-			a.mu.Unlock()
-			return errors.Join(err, cleanupErr)
+			if cleanupErr != nil {
+				return "", plumbing.ZeroHash, &syncBackupRecoveryError{message: "取消同步后备份清理失败", path: backupPath, cause: errors.Join(err, cleanupErr)}
+			}
+			return "", plumbing.ZeroHash, errors.Join(err, cleanupErr)
 		}
 		if err := a.cleanWorktreeLocked(snapshots); err != nil {
 			err = a.rollbackSnapshotsLocked(snapshots, backupPath, err)
-			a.mu.Unlock()
-			return err
+			return "", plumbing.ZeroHash, err
 		}
 	}
 	if err := a.pullBranchLocked(ctx, branch); err != nil {
 		if len(snapshots) > 0 {
 			err = a.rollbackSnapshotsLocked(snapshots, backupPath, err)
 		}
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, &syncPullFailure{cause: err}
 	}
 	if len(snapshots) > 0 {
 		if err := a.restoreSnapshotsLocked(snapshots, time.Now()); err != nil {
-			a.mu.Unlock()
-			return fmt.Errorf("恢复同步前修改失败，本地备份保留在 %s: %w", backupPath, err)
+			return "", plumbing.ZeroHash, &syncBackupRecoveryError{message: "恢复同步前修改失败，本地备份保留在", path: backupPath, cause: err}
 		}
 		if err := removeSyncBackup(backupPath); err != nil {
-			a.mu.Unlock()
-			return fmt.Errorf("移除同步备份失败 %s: %w", backupPath, err)
+			return "", plumbing.ZeroHash, &syncBackupRecoveryError{message: "移除同步备份失败", path: backupPath, cause: err}
 		}
 	}
 	if err := a.pruneEmptyDirectoriesLocked(); err != nil {
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, err
 	}
 	if _, err := a.commitLocked(message); err != nil {
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, err
 	}
 	hash, err := a.branchCommitLocked(branch)
 	if err != nil {
-		a.mu.Unlock()
-		return err
+		return "", plumbing.ZeroHash, err
 	}
-	a.mu.Unlock()
-	return a.pushCommit(ctx, branch, hash)
+	return branch, hash, nil
 }
 
 // Never start another destructive sync while an earlier snapshot may need recovery.
@@ -658,7 +659,7 @@ func (a *Adapter) checkPendingSyncBackupsLocked() error {
 	}
 	for _, entry := range entries {
 		if entry.IsDir() && strings.HasPrefix(entry.Name(), "go-filesystem-sync-") {
-			return fmt.Errorf("存在未处理的同步备份，请先检查并恢复或移除: %s", filepath.Join(gitDir, entry.Name()))
+			return &syncBackupRecoveryError{message: "存在未处理的同步备份，请先检查并恢复或移除:", path: filepath.Join(gitDir, entry.Name())}
 		}
 	}
 	return nil
@@ -1041,7 +1042,10 @@ func (a *Adapter) saveSnapshotsLocked(snapshots []dirtySnapshot) (string, error)
 		err = errors.Join(err, file.Close())
 	}
 	if err != nil {
-		return "", errors.Join(fmt.Errorf("保存同步备份失败: %w", err), removeSyncBackup(backup))
+		if cleanupErr := removeSyncBackup(backup); cleanupErr != nil {
+			return "", &syncBackupRecoveryError{message: "保存同步备份失败且清理未完成", path: backup, cause: errors.Join(err, cleanupErr)}
+		}
+		return "", fmt.Errorf("保存同步备份失败: %w", err)
 	}
 	return backup, nil
 }
@@ -1064,10 +1068,10 @@ func (a *Adapter) rollbackSnapshotsLocked(snapshots []dirtySnapshot, backup stri
 		}
 	}
 	if restoreErr != nil {
-		return fmt.Errorf("同步失败且恢复未完成，本地备份保留在 %s: %w", backup, errors.Join(cause, restoreErr))
+		return &syncBackupRecoveryError{message: "同步失败且恢复未完成，本地备份保留在", path: backup, cause: errors.Join(cause, restoreErr)}
 	}
 	if err := removeSyncBackup(backup); err != nil {
-		return fmt.Errorf("同步失败，备份清理失败 %s: %w", backup, errors.Join(cause, err))
+		return &syncBackupRecoveryError{message: "同步失败，备份清理失败", path: backup, cause: errors.Join(cause, err)}
 	}
 	return cause
 }
